@@ -2569,6 +2569,15 @@ def _init_unpacker ():
   unpackers[of.OFPT_VENDOR] = _unpack_nx_vendor
 
 from pox.openflow import PacketIn
+from pox.lib.revent import Event
+class RoleReply (Event):
+  def __init__ (self, connection, ofp):
+    Event.__init__(self)
+    self.connection = connection
+    self.ofp = ofp
+    self.role = ofp.role
+    self.dpid = connection.dpid
+core.openflow._eventMixin_events.add(RoleReply)
 
 class NiciraOpenFlowHandlers (DefaultOpenFlowHandlers):
   """
@@ -2583,9 +2592,10 @@ class NiciraOpenFlowHandlers (DefaultOpenFlowHandlers):
         e = con.ofnexus.raiseEventNoErrors(PacketIn, con, msg)
         if e is None or e.halt != True:
           con.raiseEventNoErrors(PacketIn, con, msg)
-    #  elif isinstance(msg, nxt_role_reply):
-    #    pass
-    #    #TODO
+      elif isinstance(msg, nx_role_reply):
+        e = con.ofnexus.raiseEventNoErrors(RoleReply, con, msg)
+        if e is None or e.halt != True:
+          con.raiseEventNoErrors(RoleReply, con, msg)
       else:
         DefaultOpenFlowHandlers.handle_VENDOR(con, msg)
 
