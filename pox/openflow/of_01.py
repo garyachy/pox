@@ -29,7 +29,6 @@ from pox.lib.socketcapture import CaptureSocket
 import pox.openflow.debug
 from pox.openflow.util import make_type_to_unpacker_table
 from pox.openflow import *
-from collections import namedtuple
 
 log = core.getLogger()
 
@@ -63,80 +62,23 @@ from errno import EAGAIN, ECONNRESET, EADDRINUSE, EADDRNOTAVAIL, EMFILE
 
 import traceback
 
-OFSM_PREINIT = 1
-OFSM_INIT = 2
-OFSM_CONFIG = 3
-OFSM_RUN = 4
 
-SmKey = namedtuple("SmKey", ["state", "event"])
-SmData = namedtuple("SmData", ["state", "action"])
+def handle_HELLO (con, msg): #S
+  #con.msg("HELLO wire protocol " + hex(msg.version))
 
-class StateMachine:
-    def __init__(self,  con):
-        self.con = con
-        self.enterPreinit(None)
-        self.currentState = OFSM_PREINIT
-        self.sm = {}
-        self.sm[SmKey(OFSM_PREINIT, of.OFPT_HELLO)] = SmData(OFSM_INIT, self.enterInit)
-        self.sm[SmKey(OFSM_INIT, of.OFPT_FEATURES_REPLY)] = SmData(OFSM_CONFIG, self.enterConfig)
-        self.sm[SmKey(OFSM_CONFIG, of.OFPT_BARRIER_REPLY)] = SmData(OFSM_RUN, self.enterRun)
-        self.sm[SmKey(OFSM_CONFIG, of.OFPT_ERROR)] = SmData(OFSM_RUN, self.enterRun)
+  # Send a features request
+  msg = of.ofp_features_request()
+  con.send(msg)
 
-        for type,name in of.ofp_type_map.iteritems():
-          name = name.split("OFPT_",1)[-1]
-          h = getattr(self, "handle_" + name, None)
-          if not h: continue
-          self.sm[SmKey(OFSM_RUN, type)] = SmData(OFSM_RUN, h)
+def handle_ECHO_REPLY (con, msg):
+  #con.msg("Got echo reply")
+  pass
 
-    def update(self, event,  msg):
-        print "received " + of.ofp_type_map[event]
-        if SmKey(self.currentState, event) not in self.sm: return
-        self.sm[SmKey(self.currentState, event)].action(msg)
-        self.currentState = self.sm[SmKey(self.currentState, event)].state
+def handle_ECHO_REQUEST (con, msg): #S
+  reply = msg
 
-    def enterPreinit(self, msg):
-        print "sending hello"
-        self.con.send(of.ofp_hello())
-        
-    def enterInit(self, msg):
-        print "sending feature"
-        self.con.send(of.ofp_features_request())
-
-    def enterConfig(self, msg):
-        print "sending barrier"
-        self.con.send(of.ofp_barrier_request())
-
-    def enterRun(self, msg):
-        print "raise connectionUp event"
-        self.con.info("connected")
-        self.con.connect_time = time.time()
-        e = self.con.ofnexus.raiseEventNoErrors(ConnectionUp, self.con, msg)
-        if e is None or e.halt != True:
-          self.con.raiseEventNoErrors(ConnectionUp, self.con, msg)
-          e = self.con.ofnexus.raiseEventNoErrors(FeaturesReceived, self.con, msg)
-          if e is None or e.halt != True:
-            self.con.raiseEventNoErrors(FeaturesReceived, self.con, msg)
-
-    def handle_HELLO(self, msg):
-        print "processing hello"
-
-    def handle_BARRIER_REPLY(self, msg):
-        print "processing barrier"
-        e = self.con.ofnexus.raiseEventNoErrors(BarrierIn, self.con, msg)
-        if e is None or e.halt != True:
-          self.con.raiseEventNoErrors(BarrierIn, self.con, msg)
-
-    def handle_FEATURES_REPLY(self, msg):
-        print "processing features"
-        
-    def handle_ECHO_REPLY (self, msg):
-        #self.con.msg("Got echo reply")
-        pass
-
-    def handle_ECHO_REQUEST (self, msg): #S
-        reply = msg
-        reply.header_type = of.OFPT_ECHO_REPLY
-        self.con.send(reply)
+  reply.header_type = of.OFPT_ECHO_REPLY
+  con.send(reply)
 
 def handle_FLOW_REMOVED (con, msg): #A
   e = con.ofnexus.raiseEventNoErrors(FlowRemoved, con, msg)
@@ -244,7 +186,10 @@ def handle_ERROR_MSG (con, msg): #A
     log.error(str(con) + " OpenFlow Error:\n" +
               msg.show(str(con) + " Error: ").strip())
 
-
+def handle_BARRIER (con, msg):
+  e = con.ofnexus.raiseEventNoErrors(BarrierIn, con, msg)
+  if e is None or e.halt != True:
+    con.raiseEventNoErrors(BarrierIn, con, msg)
 
 # handlers for stats replies
 def handle_OFPST_DESC (con, parts):
@@ -294,6 +239,27 @@ def handle_OFPST_QUEUE (con, parts):
 
 def handle_VENDOR (con, msg):
   log.info("Vendor msg: " + str(msg))
+
+
+# A list, where the index is an OFPT, and the value is a function to
+# call for that type
+# This is generated automatically based on handlerMap
+handlers = []
+
+# Message handlers
+handlerMap = {
+  of.OFPT_HELLO : handle_HELLO,
+  of.OFPT_ECHO_REQUEST : handle_ECHO_REQUEST,
+  of.OFPT_ECHO_REPLY : handle_ECHO_REPLY,
+  of.OFPT_PACKET_IN : handle_PACKET_IN,
+  of.OFPT_FEATURES_REPLY : handle_FEATURES_REPLY,
+  of.OFPT_PORT_STATUS : handle_PORT_STATUS,
+  of.OFPT_ERROR : handle_ERROR_MSG,
+  of.OFPT_BARRIER_REPLY : handle_BARRIER,
+  of.OFPT_STATS_REPLY : handle_STATS_REPLY,
+  of.OFPT_FLOW_REMOVED : handle_FLOW_REMOVED,
+  of.OFPT_VENDOR : handle_VENDOR,
+}
 
 statsHandlerMap = {
   of.OFPST_DESC : handle_OFPST_DESC,
@@ -666,11 +632,11 @@ class Connection (EventMixin):
     self.connect_time = None
     self.idle_time = time.time()
 
+    self.send(of.ofp_hello())
+
     self.original_ports = PortCollection()
     self.ports = PortCollection()
     self.ports._chain = self.original_ports
-    
-    self.sm = StateMachine(self)
 
     #TODO: set a time that makes sure we actually establish a connection by
     #      some timeout
@@ -802,7 +768,8 @@ class Connection (EventMixin):
       offset = new_offset
 
       try:
-        self.sm.update(ofp_type,  msg)
+        h = handlers[ofp_type]
+        h(self, msg)
       except:
         log.exception("%s: Exception while handling OpenFlow message:\n" +
                       "%s %s", self,self,
@@ -1009,6 +976,14 @@ class OpenFlow_01_Task (Task):
     log.debug("No longer listening for connections")
 
     #pox.core.quit()
+
+
+def _set_handlers ():
+  handlers.extend([None] * (1 + sorted(handlerMap.keys(),reverse=True)[0]))
+  for h in handlerMap:
+    handlers[h] = handlerMap[h]
+    #print handlerMap[h]
+_set_handlers()
 
 
 # Used by the Connection class
