@@ -89,71 +89,48 @@ class StateMachine:
           self.sm[SmKey(OFSM_RUN, type)] = SmData(OFSM_RUN, h)
 
     def update(self, event,  msg):
-        log.debug("received " + of.ofp_type_map[event])
+        print "received " + of.ofp_type_map[event]
         if SmKey(self.currentState, event) not in self.sm: return
         self.sm[SmKey(self.currentState, event)].action(msg)
         self.currentState = self.sm[SmKey(self.currentState, event)].state
 
     def enterPreinit(self, msg):
-        log.debug("sending hello")
+        print "sending hello"
         self.con.send(of.ofp_hello())
         
-    def enterInit(self, msg): # Hello reply received
-        log.debug("sending feature request")
+    def enterInit(self, msg):
+        print "sending feature"
         self.con.send(of.ofp_features_request())
 
-    def enterConfig(self, msg): # Features reply received
-        log.debug("sending barrier request")
-        self.con.features = msg
-        self.con.original_ports._ports = set(msg.ports)
-        self.con.ports._reset()
-        self.con.dpid = msg.datapath_id
-        
-        nexus = core.OpenFlowConnectionArbiter.getNexus(self.con)
-        if nexus is None:
-          # Cancel connection
-          self.con.info("No OpenFlow nexus for " + pox.lib.util.dpidToStr(msg.datapath_id))
-          self.con.disconnect()
-          return
-          
-        self.con.ofnexus = nexus
-        self.con.ofnexus._connect(self.con)
-        
-        if self.con.ofnexus.miss_send_len is not None:
-          self.con.send(of.ofp_set_config(miss_send_len = self.con.ofnexus.miss_send_len))
-          
-        if self.con.ofnexus.clear_flows_on_connect:
-          self.con.send(of.ofp_flow_mod(match=of.ofp_match(),command=of.OFPFC_DELETE))
-
+    def enterConfig(self, msg):
+        print "sending barrier"
         self.con.send(of.ofp_barrier_request())
 
-    def enterRun(self, msg): # Barrier   reply received
+    def enterRun(self, msg):
+        print "raise connectionUp event"
         self.con.info("connected")
         self.con.connect_time = time.time()
-        
-        e = self.con.ofnexus.raiseEventNoErrors(ConnectionUp, self.con, self.con.features)
+        e = self.con.ofnexus.raiseEventNoErrors(ConnectionUp, self.con, msg)
         if e is None or e.halt != True:
           self.con.raiseEventNoErrors(ConnectionUp, self.con, msg)
-          
-        e = self.con.ofnexus.raiseEventNoErrors(FeaturesReceived, self.con, self.con.features)
-        if e is None or e.halt != True:
-          self.con.raiseEventNoErrors(FeaturesReceived, self.con, msg)
+          e = self.con.ofnexus.raiseEventNoErrors(FeaturesReceived, self.con, msg)
+          if e is None or e.halt != True:
+            self.con.raiseEventNoErrors(FeaturesReceived, self.con, msg)
 
     def handle_HELLO(self, msg):
-        pass
+        print "processing hello"
 
     def handle_BARRIER_REPLY(self, msg):
+        print "processing barrier"
         e = self.con.ofnexus.raiseEventNoErrors(BarrierIn, self.con, msg)
         if e is None or e.halt != True:
           self.con.raiseEventNoErrors(BarrierIn, self.con, msg)
 
     def handle_FEATURES_REPLY(self, msg):
-        self.con.ofnexus._connect(self.con)
-        e = self.con.ofnexus.raiseEventNoErrors(FeaturesReceived, self.con, msg)
-        if e is None or e.halt != True:
-          self.con.raiseEventNoErrors(FeaturesReceived, self.con, msg)
-
+        print "processing features"
+        
     def handle_ECHO_REPLY (self, msg):
+        #self.con.msg("Got echo reply")
         pass
 
     def handle_ECHO_REQUEST (self, msg): #S
@@ -161,105 +138,171 @@ class StateMachine:
         reply.header_type = of.OFPT_ECHO_REPLY
         self.con.send(reply)
 
-    def handle_FLOW_REMOVED (self, msg): #A
-      e = self.con.ofnexus.raiseEventNoErrors(FlowRemoved, self.con, msg)
-      if e is None or e.halt != True:
-        selfcon.raiseEventNoErrors(FlowRemoved, self.con, msg)
+def handle_FLOW_REMOVED (con, msg): #A
+  e = con.ofnexus.raiseEventNoErrors(FlowRemoved, con, msg)
+  if e is None or e.halt != True:
+    con.raiseEventNoErrors(FlowRemoved, con, msg)
 
-    def handle_STATS_REPLY (self, msg):
-      e = self.con.ofnexus.raiseEventNoErrors(RawStatsReply, self.con, msg)
-      if e is None or e.halt != True:
-        self.con.raiseEventNoErrors(RawStatsReply, self.con, msg)
-      self.con._incoming_stats_reply(msg)
-    
-    def handle_PORT_STATUS (self, msg): #A
-      if msg.reason == of.OFPPR_DELETE:
-        self.con.ports._forget(msg.desc)
-      else:
-        self.con.ports._update(msg.desc)
-      e = self.con.ofnexus.raiseEventNoErrors(PortStatus, self.con, msg)
-      if e is None or e.halt != True:
-        self.con.raiseEventNoErrors(PortStatus, self.con, msg)
-    
-    def handle_PACKET_IN (self, msg): #A
-      e = self.con.ofnexus.raiseEventNoErrors(PacketIn, self.con, msg)
-      if e is None or e.halt != True:
-        self.con.raiseEventNoErrors(PacketIn, self.con, msg)
-    
-    def handle_ERROR_MSG (self, msg): #A
-      err = ErrorIn(self.con, msg)
-      e = self.con.ofnexus.raiseEventNoErrors(err)
-      if e is None or e.halt != True:
-        self.con.raiseEventNoErrors(err)
-      if err.should_log:
-        log.error(str(self.con) + " OpenFlow Error:\n" +
-                  msg.show(str(self.con) + " Error: ").strip())
-                  
-    def handle_VENDOR (con, msg):
-      log.info("Vendor msg: " + str(msg))
-      
-      
-class StatHandlers:
-    def __init__(self,  con):
-        self.con = con
-        self.handlers = {}
-        for type,name in of.ofp_stats_type_map.iteritems():
-           name = name.split("OFPST_",1)[-1]
-           h = getattr(self, "handle_" + name, None)
-           if not h: continue
-           self.handlers[type] = h
-           
-    def handle(self, event,  parts):
-        log.debug("received " + of.ofp_stats_type_map[event])
-        if event not in self.handlers: return
-        self.handlers[event](parts)
+def handle_FEATURES_REPLY (con, msg):
+  connecting = con.connect_time == None
+  con.features = msg
+  con.original_ports._ports = set(msg.ports)
+  con.ports._reset()
+  con.dpid = msg.datapath_id
 
-    # handlers for stats replies
-    def handle_OFPST_DESC (self, parts):
-       msg = parts[0].body
-       e = self.con.ofnexus.raiseEventNoErrors(SwitchDescReceived, self.con, parts[0], msg)
-       if e is None or e.halt != True:
-         self.con.raiseEventNoErrors(SwitchDescReceived, self.con, parts[0], msg)
+  if not connecting:
+    con.ofnexus._connect(con)
+    e = con.ofnexus.raiseEventNoErrors(FeaturesReceived, con, msg)
+    if e is None or e.halt != True:
+      con.raiseEventNoErrors(FeaturesReceived, con, msg)
+    return
 
-    def handle_OFPST_FLOW (self, parts):
-      msg = []
-      for part in parts:
-        msg.extend(part.body)
-      e = con.ofnexus.raiseEventNoErrors(FlowStatsReceived, con, parts, msg)
-      if e is None or e.halt != True:
-        con.raiseEventNoErrors(FlowStatsReceived, con, parts, msg)
-    
-    def handle_OFPST_AGGREGATE (self, parts):
-      msg = parts[0].body
-      e = self.con.ofnexus.raiseEventNoErrors(AggregateFlowStatsReceived, self.con,
-                                         parts[0], msg)
-      if e is None or e.halt != True:
-        self.con.raiseEventNoErrors(AggregateFlowStatsReceived, self.con, parts[0], msg)
-    
-    def handle_OFPST_TABLE (self, parts):
-      msg = []
-      for part in parts:
-        msg.extend(part.body)
-      e = self.con.ofnexus.raiseEventNoErrors(TableStatsReceived, self.con, parts, msg)
-      if e is None or e.halt != True:
-        self.con.raiseEventNoErrors(TableStatsReceived, self.con, parts, msg)
-    
-    def handle_OFPST_PORT (self, parts):
-      msg = []
-      for part in parts:
-        msg.extend(part.body)
-      e = self.con.ofnexus.raiseEventNoErrors(PortStatsReceived, self.con, parts, msg)
-      if e is None or e.halt != True:
-        self.con.raiseEventNoErrors(PortStatsReceived, self.con, parts, msg)
-    
-    def handle_OFPST_QUEUE (self, parts):
-      msg = []
-      for part in parts:
-        msg.extend(part.body)
-      e = self.con.ofnexus.raiseEventNoErrors(QueueStatsReceived, self.con, parts, msg)
-      if e is None or e.halt != True:
-        self.con.raiseEventNoErrors(QueueStatsReceived, self.con, parts, msg)
+  nexus = core.OpenFlowConnectionArbiter.getNexus(con)
+  if nexus is None:
+    # Cancel connection
+    con.info("No OpenFlow nexus for " +
+             pox.lib.util.dpidToStr(msg.datapath_id))
+    con.disconnect()
+    return
+  con.ofnexus = nexus
+  con.ofnexus._connect(con)
+  #connections[con.dpid] = con
 
+  barrier = of.ofp_barrier_request()
+
+  listeners = []
+
+  def finish_connecting (event):
+    if event.xid != barrier.xid:
+      con.dpid = None
+      con.err("failed connect")
+      con.disconnect()
+    else:
+      con.info("connected")
+      con.connect_time = time.time()
+      e = con.ofnexus.raiseEventNoErrors(ConnectionUp, con, msg)
+      if e is None or e.halt != True:
+        con.raiseEventNoErrors(ConnectionUp, con, msg)
+      e = con.ofnexus.raiseEventNoErrors(FeaturesReceived, con, msg)
+      if e is None or e.halt != True:
+        con.raiseEventNoErrors(FeaturesReceived, con, msg)
+    con.removeListeners(listeners)
+  listeners.append(con.addListener(BarrierIn, finish_connecting))
+
+  def also_finish_connecting (event):
+    if event.xid != barrier.xid: return
+    if event.ofp.type != of.OFPET_BAD_REQUEST: return
+    if event.ofp.code != of.OFPBRC_BAD_TYPE: return
+    # Okay, so this is probably an HP switch that doesn't support barriers
+    # (ugh).  We'll just assume that things are okay.
+    finish_connecting(event)
+  listeners.append(con.addListener(ErrorIn, also_finish_connecting))
+
+  #TODO: Add a timeout for finish_connecting
+
+  if con.ofnexus.miss_send_len is not None:
+    con.send(of.ofp_set_config(miss_send_len =
+                                  con.ofnexus.miss_send_len))
+  if con.ofnexus.clear_flows_on_connect:
+    con.send(of.ofp_flow_mod(match=of.ofp_match(),command=of.OFPFC_DELETE))
+
+  con.send(barrier)
+
+  """
+  # Hack for old versions of cbench
+  class C (object):
+    xid = barrier.xid
+  finish_connecting(C())
+  """
+
+def handle_STATS_REPLY (con, msg):
+  e = con.ofnexus.raiseEventNoErrors(RawStatsReply, con, msg)
+  if e is None or e.halt != True:
+    con.raiseEventNoErrors(RawStatsReply, con, msg)
+  con._incoming_stats_reply(msg)
+
+def handle_PORT_STATUS (con, msg): #A
+  if msg.reason == of.OFPPR_DELETE:
+    con.ports._forget(msg.desc)
+  else:
+    con.ports._update(msg.desc)
+  e = con.ofnexus.raiseEventNoErrors(PortStatus, con, msg)
+  if e is None or e.halt != True:
+    con.raiseEventNoErrors(PortStatus, con, msg)
+
+def handle_PACKET_IN (con, msg): #A
+  e = con.ofnexus.raiseEventNoErrors(PacketIn, con, msg)
+  if e is None or e.halt != True:
+    con.raiseEventNoErrors(PacketIn, con, msg)
+
+def handle_ERROR_MSG (con, msg): #A
+  err = ErrorIn(con, msg)
+  e = con.ofnexus.raiseEventNoErrors(err)
+  if e is None or e.halt != True:
+    con.raiseEventNoErrors(err)
+  if err.should_log:
+    log.error(str(con) + " OpenFlow Error:\n" +
+              msg.show(str(con) + " Error: ").strip())
+
+
+
+# handlers for stats replies
+def handle_OFPST_DESC (con, parts):
+  msg = parts[0].body
+  e = con.ofnexus.raiseEventNoErrors(SwitchDescReceived,con,parts[0],msg)
+  if e is None or e.halt != True:
+    con.raiseEventNoErrors(SwitchDescReceived, con, parts[0], msg)
+
+def handle_OFPST_FLOW (con, parts):
+  msg = []
+  for part in parts:
+    msg.extend(part.body)
+  e = con.ofnexus.raiseEventNoErrors(FlowStatsReceived, con, parts, msg)
+  if e is None or e.halt != True:
+    con.raiseEventNoErrors(FlowStatsReceived, con, parts, msg)
+
+def handle_OFPST_AGGREGATE (con, parts):
+  msg = parts[0].body
+  e = con.ofnexus.raiseEventNoErrors(AggregateFlowStatsReceived, con,
+                                     parts[0], msg)
+  if e is None or e.halt != True:
+    con.raiseEventNoErrors(AggregateFlowStatsReceived, con, parts[0], msg)
+
+def handle_OFPST_TABLE (con, parts):
+  msg = []
+  for part in parts:
+    msg.extend(part.body)
+  e = con.ofnexus.raiseEventNoErrors(TableStatsReceived, con, parts, msg)
+  if e is None or e.halt != True:
+    con.raiseEventNoErrors(TableStatsReceived, con, parts, msg)
+
+def handle_OFPST_PORT (con, parts):
+  msg = []
+  for part in parts:
+    msg.extend(part.body)
+  e = con.ofnexus.raiseEventNoErrors(PortStatsReceived, con, parts, msg)
+  if e is None or e.halt != True:
+    con.raiseEventNoErrors(PortStatsReceived, con, parts, msg)
+
+def handle_OFPST_QUEUE (con, parts):
+  msg = []
+  for part in parts:
+    msg.extend(part.body)
+  e = con.ofnexus.raiseEventNoErrors(QueueStatsReceived, con, parts, msg)
+  if e is None or e.halt != True:
+    con.raiseEventNoErrors(QueueStatsReceived, con, parts, msg)
+
+def handle_VENDOR (con, msg):
+  log.info("Vendor msg: " + str(msg))
+
+statsHandlerMap = {
+  of.OFPST_DESC : handle_OFPST_DESC,
+  of.OFPST_FLOW : handle_OFPST_FLOW,
+  of.OFPST_AGGREGATE : handle_OFPST_AGGREGATE,
+  of.OFPST_TABLE : handle_OFPST_TABLE,
+  of.OFPST_PORT : handle_OFPST_PORT,
+  of.OFPST_QUEUE : handle_OFPST_QUEUE,
+}
 
 # Deferred sending should be unusual, so don't worry too much about
 # efficiency
@@ -628,7 +671,6 @@ class Connection (EventMixin):
     self.ports._chain = self.original_ports
     
     self.sm = StateMachine(self)
-    self.stats = StatHandlers(self)
 
     #TODO: set a time that makes sure we actually establish a connection by
     #      some timeout
@@ -797,9 +839,15 @@ class Connection (EventMixin):
     else:
       self._previous_stats = [ofp]
 
-    if ofp.is_last_reply: 
-      self.stats.handle(self, self._previous_stats)
+    if ofp.is_last_reply:
+      handler = statsHandlerMap.get(self._previous_stats[0].type, None)
+      s = self._previous_stats
       self._previous_stats = []
+      if handler is None:
+        log.warn("No handler for stats of type " +
+                 str(self._previous_stats[0].type))
+        return
+      handler(self, s)
 
   def __str__ (self):
     #return "[Con " + str(self.ID) + "/" + str(self.dpid) + "]"
