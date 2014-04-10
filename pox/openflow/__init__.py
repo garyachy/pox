@@ -46,7 +46,9 @@ class ConnectionHandshakeComplete (Event):
   Fired immediately before ConnectionUp
   """
   def __init__ (self, connection):
+    Event.__init__(self)
     self.connection = connection
+    self.dpid = connection.dpid
 
 class ConnectionUp (Event):
   """
