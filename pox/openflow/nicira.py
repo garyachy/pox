@@ -2573,6 +2573,9 @@ from pox.openflow import PacketIn
 class NiciraOpenFlowHandlers (DefaultOpenFlowHandlers):
   """
   Nicira OpenFlow message handling functionality
+
+  In particular, we probably want to handle VENDOR messages specially for
+  switches with Nicira extensions.
   """
   @staticmethod
   def handle_VENDOR (con, msg):
@@ -2586,8 +2589,19 @@ class NiciraOpenFlowHandlers (DefaultOpenFlowHandlers):
       else:
         DefaultOpenFlowHandlers.handle_VENDOR(con, msg)
 
+# Handlers used for switches with Nicira extensions
+_nicira_handlers = NiciraOpenFlowHandlers()
+
 def _handle_ConnectionHandshakeComplete (event):
-  event.connection.handlers = NiciraOpenFlowHandlers().handlers
+  desc = event.connection.description
+  if not desc: return
+  if "Open vSwitch" not in event.connection.description.hw_desc: return
+
+  # We think we have Nicira extensions.  Log message and do initialization.
+  log = core.getLogger("nicira")
+  log.debug("%s is %s %s", event.connection, desc.hw_desc, desc.sw_desc)
+
+  event.connection.handlers = _nicira_handlers.handlers
 
 class NX (object):
   """
