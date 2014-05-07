@@ -772,6 +772,19 @@ class ofp_phy_port (ofp_base):
   def __repr__(self):
     return self.show()
 
+  def clone (self):
+    desc = self.__class__()
+    desc.port_no = self.port_no
+    desc.hw_addr = self.hw_addr
+    desc.name = self.name
+    desc.config = self.config
+    desc.state = self.state
+    desc.curr = self.curr
+    desc.advertised = self.advertised
+    desc.supported = self.supported
+    desc.peer = self.peer
+    return desc
+
 
 ##2.2 Queue Structures
 class ofp_packet_queue (ofp_base):
