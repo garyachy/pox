@@ -256,6 +256,12 @@ class Switch (object):
     po.data = data.pack()
     self.connection.send(po)
 
+  def send_port_mod (self, port_no, hw_addr, config, mask):
+    if not self.ready: return
+    po = ofp_port_mod(port_no = port_no, hw_addr = hw_addr, config = config, mask = mask)
+    self.log.debug("port_no %d, hw_addr %s, config %d, mask %d", port_no, hw_addr, config, mask)
+    self.connection.send(po)
+
   def send_packet_out (self, port_no, packet):
     if not self.ready: return
     po = ofp_packet_out(data = packet)
@@ -529,6 +535,9 @@ class AggregateSwitch (ExpireMixin, SoftwareSwitchBase):
 
     self._send_discovery()
 
+  def _rx_port_mod (self, port_mod, connection):
+    sw,port_no = self.port_map_rev[port_mod.port_no]
+    sw.send_port_mod(port_no, port_mod.hw_addr, port_mod.config, port_mod.mask)
 
   def _output_packet_physical (self, packet, gport_no):
     sw,port_no = self.port_map_rev[gport_no]
