@@ -77,6 +77,7 @@ into the edge_switch component's --ips argument.
 from pox.core import core
 
 import pox.lib.packet as pkt
+import pox.openflow.libopenflow_01 as of
 
 from pox.lib.util import dpid_to_str
 from pox.lib.addresses import IPAddr
@@ -439,8 +440,6 @@ class Switch (object):
       else:
         if p not in self.ports:
           self.ports[p] = self.core.add_interface(self, p)
-          #FIXME: The above doesn't deal correctly with ports that change
-          #       properties
 
     if do_setup:
       self.setup_switch()
@@ -552,9 +551,20 @@ class AggregateSwitch (ExpireMixin, SoftwareSwitchBase):
     for sw in self.switches.values():
       sw.send_table(self.table)
 
+  def _update_port_desc (self, ofp_in, ofp_out):
+    """
+    Copies a local port status to a global port
+    """
+    ofp_out.state = ofp_in.state
+    ofp_out.hw_addr = ofp_in.hw_addr
+    ofp_out.curr = ofp_in.curr
+    ofp_out.advertised = ofp_in.advertised
+    ofp_out.supported = ofp_in.supported
+    ofp_out.peer = ofp_in.peer
+
   def add_interface (self, switch, port):
     """
-    Adds interface to agswitch and returns unique global port number
+    Adds interface to aggswitch and returns unique global port number
     """
     if (switch,port.port_no) in self.port_map:
       return self.port_map[switch,port.port_no]
@@ -567,15 +577,9 @@ class AggregateSwitch (ExpireMixin, SoftwareSwitchBase):
 
     phy = ofp_phy_port()
     phy.port_no = gport
-    phy.hw_addr = port.hw_addr
     phy.name = name
-    # Fill in features sort of arbitrarily
-    phy.curr = OFPPF_10MB_HD
-    phy.advertised = OFPPF_10MB_HD
-    phy.supported = OFPPF_10MB_HD
-    phy.peer = OFPPF_10MB_HD
 
-    #TODO: Copy state and stuff
+    self._update_port_desc(phy, port)
 
     self.add_port(phy)
 
@@ -611,9 +615,13 @@ class AggregateSwitch (ExpireMixin, SoftwareSwitchBase):
       self.switches[event.dpid].disconnect()
 
   def _handle_openflow_PortStatus (self, event):
-    self.switches[event.dpid].update_ports()
+    if event.modified:
+      switch = self.switches[event.dpid]
+      if (switch,event.port) not in self.port_map: return
+      gport = self.port_map[switch,event.port]
 
-
+      self._update_port_desc(event.ofp.desc, self.ports[gport])
+      self.send_port_status(self.ports[gport], of.OFPPR_MODIFY)
 
 def launch (ips,
             address = '127.0.0.1', port = 7744, max_retry_delay = 16,
