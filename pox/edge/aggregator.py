@@ -137,6 +137,10 @@ RX_REMOTE_TABLE = 1
 # The actual normal OpenFlow table (equivalent of table 0)
 OPENFLOW_TABLE = 2
 
+# Aggregator
+
+AGG_MAX_PORT_NUMBER = 1000
+
 
 
 class TableSender (object):
@@ -157,7 +161,6 @@ class TableSender (object):
     self.order = order
     self.clear = clear
     self._priority = priority
-
   @property
   def last (self):
     return self._fms[-1]
@@ -199,8 +202,7 @@ class TableSender (object):
 
     data = b''.join(x.pack() for x in self._fms)
     self._connection.send(data)
-    #self._connection.msg("sending %i entries" % (len(self._fms),))
-
+    self._connection.msg("sending %i entries" % (len(self._fms),))
 
 class Switch (object):
   """
@@ -278,10 +280,10 @@ class Switch (object):
 
     con = self.connection
     with TableSender(con, table_id=RX_REMOTE_TABLE, clear=True) as table:
-      for port,gport in self.ports.items():
+      for port_no,gport in self.ports.items():
         table.entry()
-        table.last.actions.append( ofp_action_output(port=port.port_no) )
-        table.last.match.tun_id = port.port_no
+        table.last.actions.append( ofp_action_output(port=port_no) )
+        table.last.match.tun_id = port_no
 
       table.entry()
       table.last.match.tun_id = MALL
@@ -390,6 +392,8 @@ class Switch (object):
     """
     Do some switch setup once we know tun_port
     """
+    self.log.debug("Initial switch setup")
+
     send = self.connection.send
     con = self.connection
 
@@ -417,32 +421,59 @@ class Switch (object):
 
     self.log.info("Switch configured")
 
+  def add_port (self, port):
+    do_setup = False
+
+    if port.name.startswith("tun"):
+      try:
+        dummy = int(port.name[3:])
+      except:
+        pass
+
+      if port.port_no != self.tun_port:
+        self.log.debug("Added a new tunnel port %s is OF port %s", port.name, port.port_no)
+      self.tun_port = port.port_no
+
+      do_setup = True
+    elif port.port_no >= OFPP_MAX: # Off-by-one?
+      # Ignore special ports
+      pass
+    else:
+      if port.port_no not in self.ports:
+        self.ports[port.port_no] = self.core.add_interface(self, port)
+
+    return do_setup
+
+  def delete_port (self, port):
+    do_setup = False
+
+    if port.name.startswith("tun"):
+      try:
+        dummy = int(port.name[3:])
+      except:
+        pass
+
+      if port.port_no == self.tun_port:
+        self.log.debug("Deleted a tunnel port %s is OF port %s", port.name, port.port_no)
+        self.tun_port = None
+
+      do_setup = True
+    elif port.port_no >= OFPP_MAX: # Off-by-one?
+      # Ignore special ports
+      pass
+    else:
+      if port.port_no in self.ports:
+        del self.ports[port.port_no]
+        self.core.del_interface(self, port)
+
+    return do_setup
+
   def update_ports (self):
     if not self.connection: return
 
-    do_setup = False
-
     for p in self.connection.ports.values():
-      if p.name.startswith("tun"):
-        try:
-          dummy = int(p.name[3:])
-        except:
-          pass
-
-        if p.port_no != self.tun_port:
-          self.log.debug("Tunnel port %s is OF port %s", p.name, p.port_no)
-        self.tun_port = p.port_no
-
-        do_setup = True
-      elif p.port_no >= OFPP_MAX: # Off-by-one?
-        # Ignore special ports
-        pass
-      else:
-        if p not in self.ports:
-          self.ports[p] = self.core.add_interface(self, p)
-
-    if do_setup:
-      self.setup_switch()
+      do_setup = self.add_port(p)
+      if do_setup:  self.setup_switch()
 
     #TODO: Only send this when necessary
     self.send_rx_remote_table()
@@ -465,6 +496,8 @@ class Switch (object):
     if not isinstance(event.ofp, nxt_packet_in): return
     packet = event.parsed
     from_tunnel = event.port == self.tun_port
+
+    #self.log.debug("event.port %d, self.tun_port%d", event.port, self.tun_port)
 
     if from_tunnel:
       self._handle_discovery(event) # Doesn't actually matter if it is
@@ -490,7 +523,7 @@ class Switch (object):
 
 class AggregateSwitch (ExpireMixin, SoftwareSwitchBase):
   # Default level for loggers of this class
-  default_log_level = logging.INFO
+  default_log_level = logging.DEBUG
 
   MAX_DISCOVERY_BACKOFF = 10
 
@@ -562,13 +595,23 @@ class AggregateSwitch (ExpireMixin, SoftwareSwitchBase):
     ofp_out.supported = ofp_in.supported
     ofp_out.peer = ofp_in.peer
 
+  def _generate_gport (self):
+    """
+    Generates a global port number
+    """
+    for i in range(1, AGG_MAX_PORT_NUMBER):
+      if i not in self.port_map_rev: return i
+    return 0
+
   def add_interface (self, switch, port):
     """
     Adds interface to aggswitch and returns unique global port number
     """
     if (switch,port.port_no) in self.port_map:
       return self.port_map[switch,port.port_no]
-    gport = len(self.port_map) + 1
+
+    gport = self._generate_gport()
+
     self.port_map[switch,port.port_no] = gport
     self.port_map_rev[gport] = (switch,port.port_no)
 
@@ -579,12 +622,74 @@ class AggregateSwitch (ExpireMixin, SoftwareSwitchBase):
     phy.port_no = gport
     phy.name = name
 
-    self._update_port_desc(phy, port)
+    self._update_port_desc(port, phy)
 
+    self.log.debug("Adding port %s, port_no %d", phy.name, phy.port_no)
     self.add_port(phy)
 
     return len(self.port_map) # Global port number
 
+  def del_interface (self, switch, port):
+    """
+    Deletes interface from aggswitch
+    """
+    if (switch,port.port_no) not in self.port_map:
+      return
+
+    gport = self.port_map[switch,port.port_no]
+
+    self.log.debug("Deleting port_no %d", gport)
+    self.delete_port(gport)
+
+    del self.port_map[switch,port.port_no]
+    del self.port_map_rev[gport]
+
+  def get_gport (self, dpid, port):
+    """
+    Converts a local port number to a global port number
+    """
+    switch = self.switches[dpid]
+    if (switch, port) not in self.port_map: return 0
+    gport = self.port_map[switch,port]
+
+    return gport
+
+  def add_port_agg (self, dpid, desc):
+    """
+    Adds a port
+
+    Sends a port_status message to the controller
+
+    """
+    switch = self.switches[dpid]
+
+    do_setup = switch.add_port(desc)
+    if do_setup: switch.setup_switch()
+
+    #TODO: Only send this when necessary
+    switch.send_rx_remote_table()
+
+  def update_port_agg (self, dpid, desc):
+    """
+    Updates a port
+
+    Sends a port_status message to the controller
+
+    """
+    gport = self.get_gport(dpid, desc.port_no)
+    self._update_port_desc(desc, self.ports[gport])
+    self.send_port_status(self.ports[gport], of.OFPPR_MODIFY)
+
+  def delete_port_agg (self, dpid, desc):
+    """
+    Deletes a port
+
+    Sends a port_status message to the controller
+
+    """
+    switch = self.switches[dpid]
+
+    switch.delete_port(desc)
 
   def _send_discovery (self):
     """
@@ -615,13 +720,16 @@ class AggregateSwitch (ExpireMixin, SoftwareSwitchBase):
       self.switches[event.dpid].disconnect()
 
   def _handle_openflow_PortStatus (self, event):
-    if event.modified:
-      switch = self.switches[event.dpid]
-      if (switch,event.port) not in self.port_map: return
-      gport = self.port_map[switch,event.port]
+    #print event.ofp
 
-      self._update_port_desc(event.ofp.desc, self.ports[gport])
-      self.send_port_status(self.ports[gport], of.OFPPR_MODIFY)
+    if event.added:
+      self.add_port_agg(event.dpid, event.ofp.desc)
+
+    if event.deleted:
+      self.delete_port_agg(event.dpid, event.ofp.desc)
+
+    if event.modified:
+      self.update_port_agg(event.dpid, event.ofp.desc)
 
 def launch (ips,
             address = '127.0.0.1', port = 7744, max_retry_delay = 16,
