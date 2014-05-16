@@ -421,17 +421,26 @@ class Switch (object):
 
     self.log.info("Switch configured")
 
+  def _is_tunnel_name (self, name):
+    """
+    Validates that a port name is like tun[0-9]+
+    """
+    if name.startswith("tun"):
+      try:
+        dummy = int(name[3:])
+        return True
+      except:
+        return False
+
   def add_port (self, port):
+    """
+    Adds a port to local and global switches
+    """
     do_setup = False
 
-    if port.name.startswith("tun"):
-      try:
-        dummy = int(port.name[3:])
-      except:
-        pass
-
+    if self._is_tunnel_name(port.name):
       if port.port_no != self.tun_port:
-        self.log.debug("Added a new tunnel port %s is OF port %s", port.name, port.port_no)
+        self.log.debug("Tunnel port %s is OF port %s", port.name, port.port_no)
       self.tun_port = port.port_no
 
       do_setup = True
@@ -445,16 +454,14 @@ class Switch (object):
     return do_setup
 
   def delete_port (self, port):
+    """
+    Deletes a port from local and global switches
+    """
     do_setup = False
 
-    if port.name.startswith("tun"):
-      try:
-        dummy = int(port.name[3:])
-      except:
-        pass
-
+    if self._is_tunnel_name(port.name):
       if port.port_no == self.tun_port:
-        self.log.debug("Deleted a tunnel port %s is OF port %s", port.name, port.port_no)
+        self.log.debug("Lost a tunnel port %s", port.name)
         self.tun_port = None
 
       do_setup = True
@@ -469,6 +476,9 @@ class Switch (object):
     return do_setup
 
   def update_ports (self):
+    """
+    Adds ports and updates flow tables
+    """
     if not self.connection: return
 
     for p in self.connection.ports.values():
@@ -568,7 +578,14 @@ class AggregateSwitch (ExpireMixin, SoftwareSwitchBase):
     self._send_discovery()
 
   def _rx_port_mod (self, port_mod, connection):
-    sw,port_no = self.port_map_rev[port_mod.port_no]
+    gport = port_mod.port_no
+    if gport not in self.port_map_rev:
+      self.send_error(type=OFPET_PORT_MOD_FAILED, code=OFPPMFC_BAD_PORT,
+                      ofp=port_mod, connection=connection)
+      self.log.debug("Port %d is unknown to Aggregator", port_mod.port_no)
+      return
+
+    sw,port_no = self.port_map_rev[gport]
     sw.send_port_mod(port_no, port_mod.hw_addr, port_mod.config, port_mod.mask)
 
   def _output_packet_physical (self, packet, gport_no):
@@ -584,24 +601,14 @@ class AggregateSwitch (ExpireMixin, SoftwareSwitchBase):
     for sw in self.switches.values():
       sw.send_table(self.table)
 
-  def _update_port_desc (self, ofp_in, ofp_out):
-    """
-    Copies a local port status to a global port
-    """
-    ofp_out.state = ofp_in.state
-    ofp_out.hw_addr = ofp_in.hw_addr
-    ofp_out.curr = ofp_in.curr
-    ofp_out.advertised = ofp_in.advertised
-    ofp_out.supported = ofp_in.supported
-    ofp_out.peer = ofp_in.peer
-
-  def _generate_gport (self):
+  def _generate_gport (self, switch, port):
     """
     Generates a global port number
     """
     for i in range(1, AGG_MAX_PORT_NUMBER):
       if i not in self.port_map_rev: return i
-    return 0
+
+    raise RuntimeError("The max port number %d is exceeded" + AGG_MAX_PORT_NUMBER)
 
   def add_interface (self, switch, port):
     """
@@ -610,7 +617,7 @@ class AggregateSwitch (ExpireMixin, SoftwareSwitchBase):
     if (switch,port.port_no) in self.port_map:
       return self.port_map[switch,port.port_no]
 
-    gport = self._generate_gport()
+    gport = self._generate_gport(switch, port)
 
     self.port_map[switch,port.port_no] = gport
     self.port_map_rev[gport] = (switch,port.port_no)
@@ -618,11 +625,9 @@ class AggregateSwitch (ExpireMixin, SoftwareSwitchBase):
     #FIXME: What if this doesn't fit?
     name = "%s.%s" % (switch.dpid, port.name)
 
-    phy = ofp_phy_port()
+    phy = port.clone()
     phy.port_no = gport
     phy.name = name
-
-    self._update_port_desc(port, phy)
 
     self.log.debug("Adding port %s, port_no %d", phy.name, phy.port_no)
     self.add_port(phy)
@@ -644,7 +649,7 @@ class AggregateSwitch (ExpireMixin, SoftwareSwitchBase):
     del self.port_map[switch,port.port_no]
     del self.port_map_rev[gport]
 
-  def get_gport (self, dpid, port):
+  def _port_to_gport (self, dpid, port):
     """
     Converts a local port number to a global port number
     """
@@ -654,12 +659,10 @@ class AggregateSwitch (ExpireMixin, SoftwareSwitchBase):
 
     return gport
 
-  def add_port_agg (self, dpid, desc):
+  def _add_port_agg (self, dpid, desc):
     """
     Adds a port
-
     Sends a port_status message to the controller
-
     """
     switch = self.switches[dpid]
 
@@ -669,23 +672,19 @@ class AggregateSwitch (ExpireMixin, SoftwareSwitchBase):
     #TODO: Only send this when necessary
     switch.send_rx_remote_table()
 
-  def update_port_agg (self, dpid, desc):
+  def _update_port_agg (self, dpid, desc):
     """
     Updates a port
-
     Sends a port_status message to the controller
-
     """
-    gport = self.get_gport(dpid, desc.port_no)
-    self._update_port_desc(desc, self.ports[gport])
+    gport = self._port_to_gport(dpid, desc.port_no)
+    self.ports[gport] = desc.clone()
     self.send_port_status(self.ports[gport], of.OFPPR_MODIFY)
 
-  def delete_port_agg (self, dpid, desc):
+  def _delete_port_agg (self, dpid, desc):
     """
     Deletes a port
-
     Sends a port_status message to the controller
-
     """
     switch = self.switches[dpid]
 
@@ -723,13 +722,13 @@ class AggregateSwitch (ExpireMixin, SoftwareSwitchBase):
     #print event.ofp
 
     if event.added:
-      self.add_port_agg(event.dpid, event.ofp.desc)
+      self._add_port_agg(event.dpid, event.ofp.desc)
 
     if event.deleted:
-      self.delete_port_agg(event.dpid, event.ofp.desc)
+      self._delete_port_agg(event.dpid, event.ofp.desc)
 
     if event.modified:
-      self.update_port_agg(event.dpid, event.ofp.desc)
+      self._update_port_agg(event.dpid, event.ofp.desc)
 
 def launch (ips,
             address = '127.0.0.1', port = 7744, max_retry_delay = 16,
