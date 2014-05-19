@@ -265,6 +265,10 @@ class Switch (object):
     self.log.debug("port_no %d, hw_addr %s, config %d, mask %d", port_no, hw_addr, config, mask)
     self.connection.send(po)
 
+  def send_stats_request (self, stats_request_type):
+    if not self.ready: return
+    self.connection.send(of.ofp_stats_request(body=stats_request_type))
+
   def send_packet_out (self, port_no, packet):
     if not self.ready: return
     po = ofp_packet_out(data = packet)
@@ -554,7 +558,7 @@ class AggregateSwitch (ExpireMixin, SoftwareSwitchBase):
     self.switches = {}    # dpid->Switch
     self.table = {}       # MAC->(dpid,port)
 
-
+    self._stats_xid = None
 
     log_level = kw.pop('log_level', self.default_log_level)
 
@@ -587,6 +591,27 @@ class AggregateSwitch (ExpireMixin, SoftwareSwitchBase):
 
     sw,port_no = self.port_map_rev[gport]
     sw.send_port_mod(port_no, port_mod.hw_addr, port_mod.config, port_mod.mask)
+
+  def _stats_flow (self, ofp, connection):
+    if len(self.switches) == 0: return
+
+    self._stats_xid = ofp.xid
+    switch = self.switches.itervalues().next()
+    switch.send_stats_request(ofp.body)
+
+  def _stats_port (self, ofp, connection):
+    if len(self.switches) == 0: return
+
+    self._stats_xid = ofp.xid
+    gport_no = ofp.body.port_no
+
+    if gport_no == of.OFPP_NONE:
+      for switch in self.switches.values():
+        switch.send_stats_request(ofp.body)
+    else:
+      switch,port_no = self.port_map_rev[gport_no]
+      ofp.body.port_no = port_no
+      switch.send_stats_request(ofp.body)
 
   def _output_packet_physical (self, packet, gport_no):
     sw,port_no = self.port_map_rev[gport_no]
@@ -654,7 +679,9 @@ class AggregateSwitch (ExpireMixin, SoftwareSwitchBase):
     Converts a local port number to a global port number
     """
     switch = self.switches[dpid]
-    if (switch, port) not in self.port_map: return 0
+    if (switch, port) not in self.port_map:
+      raise RuntimeError("Can not convert a port")
+
     gport = self.port_map[switch,port]
 
     return gport
@@ -729,6 +756,28 @@ class AggregateSwitch (ExpireMixin, SoftwareSwitchBase):
 
     if event.modified:
       self._update_port_agg(event.dpid, event.ofp.desc)
+
+  def _handle_openflow_FlowStatsReceived (self, event):
+    reply = of.ofp_stats_reply(xid=self._stats_xid, type=of.OFPST_FLOW, body=event.stats)
+    self.send(reply)
+
+    #for stat in event.stats:
+      #self.log.debug("Traffic: %s bytes, %s packets over %s cookie", stat.byte_count, stat.packet_count, stat.cookie)
+
+  def _handle_openflow_PortStatsReceived (self, event):
+    stats = []
+    for stat in event.stats:
+      try:
+        stat.port_no = self._port_to_gport(event.dpid, stat.port_no)
+        stats.append(stat)
+      except:
+        continue
+
+    reply = of.ofp_stats_reply(xid=self._stats_xid, type=of.OFPST_PORT, body=stats)
+    self.send(reply)
+
+    #for stat in stats:
+      #log.info("Traffic: %s rx_packets, %s tx_packets over %s port", stat.rx_packets, stat.tx_packets, stat.port_no)
 
 def launch (ips,
             address = '127.0.0.1', port = 7744, max_retry_delay = 16,

@@ -37,23 +37,23 @@ def _handle_PortStatus (event):
   log.debug("_handle_PortStatus: %i port", event.port)
 
 def _handle_FlowStats (event):
-  bytes = 0
-  flows = 0
+  for stat in event.stats:
+    log.info("Traffic: %s bytes, %s packets over %s cookie", stat.byte_count, stat.packet_count, stat.cookie)
 
-  for f in event.stats:
-    bytes += f.byte_count
-    flows += 1
-
-  log.info("Traffic: %s bytes over %s flows", bytes, flows)
+def _handle_PortStats (event):
+  for stat in event.stats:
+    log.info("Traffic: %s rx_packets, %s tx_packets over %s port", stat.rx_packets, stat.tx_packets, stat.port_no)
 
 def _timer_func ():
   for connection in core.openflow._connections.values():
     connection.send(of.ofp_stats_request(body=of.ofp_flow_stats_request()))
+    connection.send(of.ofp_stats_request(body=of.ofp_port_stats_request()))
 
 def launch ():
   core.openflow.addListenerByName("ConnectionUp", _handle_ConnectionUp)
   core.openflow.addListenerByName("PortStatus", _handle_PortStatus)
   core.openflow.addListenerByName("FlowStatsReceived", _handle_FlowStats)
+  core.openflow.addListenerByName("PortStatsReceived", _handle_PortStats)
 
   Timer(5, _timer_func, recurring=True)
 
