@@ -559,6 +559,8 @@ class AggregateSwitch (ExpireMixin, SoftwareSwitchBase):
     self.table = {}       # MAC->(dpid,port)
 
     self._stats_xid = None
+    self._port_stats = []
+    self._port_stats_count = 0
 
     log_level = kw.pop('log_level', self.default_log_level)
 
@@ -606,9 +608,11 @@ class AggregateSwitch (ExpireMixin, SoftwareSwitchBase):
     gport_no = ofp.body.port_no
 
     if gport_no == of.OFPP_NONE:
+      self._port_stats_count = len(self.switches)
       for switch in self.switches.values():
         switch.send_stats_request(ofp.body)
     else:
+      self._port_stats_count = 1
       switch,port_no = self.port_map_rev[gport_no]
       ofp.body.port_no = port_no
       switch.send_stats_request(ofp.body)
@@ -680,7 +684,7 @@ class AggregateSwitch (ExpireMixin, SoftwareSwitchBase):
     """
     switch = self.switches[dpid]
     if (switch, port) not in self.port_map:
-      raise RuntimeError("Can not convert a port")
+      return None
 
     gport = self.port_map[switch,port]
 
@@ -705,6 +709,7 @@ class AggregateSwitch (ExpireMixin, SoftwareSwitchBase):
     Sends a port_status message to the controller
     """
     gport = self._port_to_gport(dpid, desc.port_no)
+    if gport is None: return
     self.ports[gport] = desc.clone()
     self.send_port_status(self.ports[gport], of.OFPPR_MODIFY)
 
@@ -765,19 +770,22 @@ class AggregateSwitch (ExpireMixin, SoftwareSwitchBase):
       #self.log.debug("Traffic: %s bytes, %s packets over %s cookie", stat.byte_count, stat.packet_count, stat.cookie)
 
   def _handle_openflow_PortStatsReceived (self, event):
-    stats = []
+    if self._port_stats_count < 1: return
+    self._port_stats_count -= 1
+
     for stat in event.stats:
-      try:
-        stat.port_no = self._port_to_gport(event.dpid, stat.port_no)
-        stats.append(stat)
-      except:
-        continue
+      stat.port_no = self._port_to_gport(event.dpid, stat.port_no)
+      if stat.port_no is None: continue
+      self._port_stats.append(stat)
 
-    reply = of.ofp_stats_reply(xid=self._stats_xid, type=of.OFPST_PORT, body=stats)
-    self.send(reply)
-
-    #for stat in stats:
+    #for stat in self._port_stats:
       #log.info("Traffic: %s rx_packets, %s tx_packets over %s port", stat.rx_packets, stat.tx_packets, stat.port_no)
+
+    if self._port_stats_count == 0:
+      self._port_stats = sorted(self._port_stats, key=lambda stat: stat.port_no)
+      reply = of.ofp_stats_reply(xid=self._stats_xid, type=of.OFPST_PORT, body=self._port_stats)
+      self.send(reply)
+      self._port_stats = []
 
 def launch (ips,
             address = '127.0.0.1', port = 7744, max_retry_delay = 16,

@@ -37,10 +37,14 @@ def _handle_PortStatus (event):
   log.debug("_handle_PortStatus: %i port", event.port)
 
 def _handle_FlowStats (event):
+  log.info("Handling flow stats event")
+
   for stat in event.stats:
     log.info("Traffic: %s bytes, %s packets over %s cookie", stat.byte_count, stat.packet_count, stat.cookie)
 
 def _handle_PortStats (event):
+  log.info("Handling port stats event")
+
   for stat in event.stats:
     log.info("Traffic: %s rx_packets, %s tx_packets over %s port", stat.rx_packets, stat.tx_packets, stat.port_no)
 
