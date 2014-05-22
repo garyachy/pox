@@ -272,6 +272,8 @@ class Switch (object):
     self.core._stats_xid_map[request.xid] = parent_xid
     self.connection.send(request)
 
+    self.core._stats_job_map[parent_xid].add_local_xid(request.xid)
+
   def send_packet_out (self, port_no, packet):
     if not self.ready: return
     po = ofp_packet_out(data = packet)
@@ -536,6 +538,33 @@ class Switch (object):
     self.core.rx_packet(event.parsed, in_port, event.data)
     self.log.debug("Translated packet-in")
 
+class StatsJob (object):
+  def __init__ (self, global_xid):
+    """
+    Create a StatsJob instance
+    """
+    self._local_xid_map = set()
+    self._global_xid = global_xid
+    self.port_stats = []
+
+  def add_local_xid (self, local_xid):
+    """
+    Add a local xid
+    """
+    self._local_xid_map.add(local_xid)
+
+  def remove_local_xid (self, local_xid):
+    """
+    Remove a local xid
+    """
+    self._local_xid_map.remove(local_xid)
+
+  def is_empty (self):
+    """
+    Check if local xid set is empty
+    """
+    return (len(self._local_xid_map) == 0)
+
 class AggregateSwitch (ExpireMixin, SoftwareSwitchBase):
   # Default level for loggers of this class
   default_log_level = logging.DEBUG
@@ -560,8 +589,7 @@ class AggregateSwitch (ExpireMixin, SoftwareSwitchBase):
     self.table = {}       # MAC->(dpid,port)
 
     self._stats_xid_map = {}
-    self._port_stats = []
-    self._port_stats_count = 0
+    self._stats_job_map = {}
 
     log_level = kw.pop('log_level', self.default_log_level)
 
@@ -598,6 +626,8 @@ class AggregateSwitch (ExpireMixin, SoftwareSwitchBase):
   def _stats_flow (self, ofp, connection):
     if len(self.switches) == 0: return
 
+    self._stats_job_map[ofp.xid] = StatsJob(ofp.xid)
+
     switch = self.switches.itervalues().next()
     switch.send_stats_request(ofp.body, ofp.xid)
 
@@ -605,6 +635,8 @@ class AggregateSwitch (ExpireMixin, SoftwareSwitchBase):
     if len(self.switches) == 0: return
 
     gport_no = ofp.body.port_no
+
+    self._stats_job_map[ofp.xid] = StatsJob(ofp.xid)
 
     if gport_no == of.OFPP_NONE:
       self._port_stats_count = len(self.switches)
@@ -780,6 +812,7 @@ class AggregateSwitch (ExpireMixin, SoftwareSwitchBase):
 
     reply = of.ofp_stats_reply(xid=global_xid, type=of.OFPST_FLOW, body=event.stats)
     self.send(reply)
+    del self._stats_job_map[global_xid]
 
     #for stat in event.stats:
       #self.log.debug("Traffic: %s bytes, %s packets over %s cookie", stat.byte_count, stat.packet_count, stat.cookie)
@@ -788,22 +821,21 @@ class AggregateSwitch (ExpireMixin, SoftwareSwitchBase):
     local_xid = event.ofp[0].xid
     global_xid = self._pop_global_xid(local_xid)
 
-    if self._port_stats_count < 1: return
-    self._port_stats_count -= 1
+    self._stats_job_map[global_xid].remove_local_xid(local_xid)
 
     for stat in event.stats:
       stat.port_no = self._port_to_gport(event.dpid, stat.port_no)
       if stat.port_no is None: continue
-      self._port_stats.append(stat)
+      self._stats_job_map[global_xid].port_stats.append(stat)
 
     #for stat in self._port_stats:
       #log.info("Traffic: %s rx_packets, %s tx_packets over %s port", stat.rx_packets, stat.tx_packets, stat.port_no)
 
-    if self._port_stats_count == 0:
-      self._port_stats = sorted(self._port_stats, key=lambda stat: stat.port_no)
-      reply = of.ofp_stats_reply(xid=global_xid, type=of.OFPST_PORT, body=self._port_stats)
+    if self._stats_job_map[global_xid].is_empty() is True:
+      self._stats_job_map[global_xid].port_stats = sorted(self._stats_job_map[global_xid].port_stats, key=lambda stat: stat.port_no)
+      reply = of.ofp_stats_reply(xid=global_xid, type=of.OFPST_PORT, body=self._stats_job_map[global_xid].port_stats)
       self.send(reply)
-      self._port_stats = []
+      del self._stats_job_map[global_xid]
 
 def launch (ips,
             address = '127.0.0.1', port = 7744, max_retry_delay = 16,
