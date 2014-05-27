@@ -140,6 +140,7 @@ OPENFLOW_TABLE = 2
 # Aggregator
 
 AGG_MAX_PORT_NUMBER = 1000
+AGG_MAX_FLOW_NUMBER = 10000
 
 
 
@@ -307,6 +308,41 @@ class Switch (object):
       # 0 is an invalid port value; we use it for our discovery packets
       table.last.actions.append( ofp_action_output(port=OFPP_CONTROLLER) )
 
+  def _convert_action_output (self, a, actions):
+    if a.port >= OFPP_MAX: # Off by one?
+        if a.port == OFPP_ALL or a.port == OFPP_FLOOD:
+          #FIXME: If we don't propagate the port config bits to the actual
+          #       ports, we probably need to translate them here.
+          #FIXME: We can't actually use ALL here because that'd send to
+          #       the tunnel port, which is not what we want.  We should
+          #       break it out into individual output actions, but we
+          #       currently just do FLOOD when told to do ALL.
+          actions.append(ofp_action_output(port=FLOOD))
+          p = MALL if a.port == OFPP_ALL else MFLOOD
+          actions.append(nx_reg_load(value=p, dst=NXM_NX_TUN_ID))
+          for rsw in self.core.switches:
+            if rsw.ip is None: return
+            actions.append(nx_reg_load(dst=NXM_NX_TUN_IPV4_DST(rsw.ip)))
+            actions.append(ofp_action_output(port=self.tun_port))
+        else:
+          #FIXME: LOCAL is meaningless and should probaby be stripped.
+          #       We need special handling for IN_PORT (in case the
+          #       in port is the tunnel).  What about the rest of them?
+          #       For the moment, we'll just pretend things will be okay.
+          fm.actions.append(a)
+    else: # A plain old port
+      osw,out_port = self.core.port_map_rev.get(a.port,(None,None))
+      if osw is None:
+        # Don't know this switch?!
+        return
+      if osw is self:
+        # Local port; easy.
+        actions.append(ofp_action_output(port=out_port))
+      else:
+        # Remote port
+        actions.append(nx_reg_load(value=out_port, dst=NXM_NX_TUN_ID))
+        actions.append(nx_reg_load(dst=NXM_NX_TUN_IPV4_DST(osw.ip)))
+        actions.append(ofp_action_output(port=self.tun_port))
 
   def send_table (self, table):
     """
@@ -324,6 +360,8 @@ class Switch (object):
       fms.append(fm)
       fm.table_id = OPENFLOW_TABLE
       fm.priority = entry.priority
+      fm.cookie = self.core._generate_cookie()
+      self.core._flow_cookie_map[fm.cookie] = entry.cookie
       #TODO: flags, etc.?
 
       em = entry.match
@@ -338,40 +376,7 @@ class Switch (object):
 
       for a in entry.actions:
         if isinstance(a, ofp_action_output):
-          if a.port >= OFPP_MAX: # Off by one?
-            if a.port == OFPP_ALL or a.port == OFPP_FLOOD:
-              #FIXME: If we don't propagate the port config bits to the actual
-              #       ports, we probably need to translate them here.
-              #FIXME: We can't actually use ALL here because that'd send to
-              #       the tunnel port, which is not what we want.  We should
-              #       break it out into individual output actions, but we
-              #       currently just do FLOOD when told to do ALL.
-              fm.actions.append(ofp_action_output(port=FLOOD))
-              p = MALL if a.port == OFPP_ALL else MFLOOD
-              fm.actions.append(nx_reg_load(value=p, dst=NXM_NX_TUN_ID))
-              for rsw in self.core.switches:
-                if rsw.ip is None: continue
-                fm.actions.append(nx_reg_load(dst=NXM_NX_TUN_IPV4_DST(rsw.ip)))
-                fm.actions.append(ofp_action_output(port=self.tun_port))
-            else:
-              #FIXME: LOCAL is meaningless and should probaby be stripped.
-              #       We need special handling for IN_PORT (in case the
-              #       in port is the tunnel).  What about the rest of them?
-              #       For the moment, we'll just pretend things will be okay.
-              fm.actions.append(a)
-          else: # A plain old port
-            osw,out_port = self.core.port_map_rev.get(a.port,(None,None))
-            if osw is None:
-              # Don't know this switch?!
-              continue
-            if osw is self:
-              # Local port; easy.
-              fm.actions.append(ofp_action_output(port=out_port))
-            else:
-              # Remote port
-              fm.actions.append(nx_reg_load(value=out_port, dst=NXM_NX_TUN_ID))
-              fm.actions.append(nx_reg_load(dst=NXM_NX_TUN_IPV4_DST(osw.ip)))
-              fm.actions.append(ofp_action_output(port=self.tun_port))
+          self._convert_action_output(a, fm.actions)
         #TODO: Convert other actions?
         else:
           fm.actions.append(a)
@@ -591,6 +596,9 @@ class AggregateSwitch (ExpireMixin, SoftwareSwitchBase):
     self._stats_xid_map = {}
     self._stats_job_map = {}
 
+    self._flow_cookie_map = {}
+    self._flow_cookie_set = set()
+
     log_level = kw.pop('log_level', self.default_log_level)
 
     core.addListeners(self)
@@ -612,6 +620,21 @@ class AggregateSwitch (ExpireMixin, SoftwareSwitchBase):
 
     self._send_discovery()
 
+  def _find_flow_entry_cookie(self, cookie):
+    for entry in self.table.entries:
+      if entry.cookie == cookie:
+        return entry
+
+    return None
+
+  def _generate_cookie(self):
+    for i in range(1, AGG_MAX_FLOW_NUMBER):
+      if i not in self._flow_cookie_set:
+        self._flow_cookie_set.add(i)
+        return i
+
+    return None
+
   def _rx_port_mod (self, port_mod, connection):
     gport = port_mod.port_no
     if gport not in self.port_map_rev:
@@ -624,6 +647,8 @@ class AggregateSwitch (ExpireMixin, SoftwareSwitchBase):
     sw.send_port_mod(port_no, port_mod.hw_addr, port_mod.config, port_mod.mask)
 
   def _stats_flow (self, ofp, connection):
+    #print "Received Flow Stats request"
+    #print ofp
     if len(self.switches) == 0: return
 
     self._stats_job_map[ofp.xid] = StatsJob(ofp.xid)
@@ -658,6 +683,18 @@ class AggregateSwitch (ExpireMixin, SoftwareSwitchBase):
     """
     # We need to update our flow tables on the south side
     log.debug("Translating flow table")
+
+    for entry in self.table.entries:
+      # update the actions field in the matching flows
+      match = event.added[0].match
+      priority = event.added[0].priority
+
+      if entry.is_matched_by(match=match, priority=priority, strict=True):
+        if event.added:
+          entry.cookie = self._generate_cookie()
+        if event.removed:
+          del self._flow_cookie_set[entry.cookie]
+
     for sw in self.switches.values():
       sw.send_table(self.table)
 
@@ -668,7 +705,7 @@ class AggregateSwitch (ExpireMixin, SoftwareSwitchBase):
     for i in range(1, AGG_MAX_PORT_NUMBER):
       if i not in self.port_map_rev: return i
 
-    raise RuntimeError("The max port number %d is exceeded" + AGG_MAX_PORT_NUMBER)
+    return None
 
   def add_interface (self, switch, port):
     """
@@ -807,14 +844,39 @@ class AggregateSwitch (ExpireMixin, SoftwareSwitchBase):
       self._update_port_agg(event.dpid, event.ofp.desc)
 
   def _handle_openflow_FlowStatsReceived (self, event):
+    #print "Received Flow Stats reply"
+    #print event.ofp[0]
     local_xid = event.ofp[0].xid
     global_xid = self._pop_global_xid(local_xid)
 
-    reply = of.ofp_stats_reply(xid=global_xid, type=of.OFPST_FLOW, body=event.stats)
+    stats = []
+
+    for stat in event.stats:
+      if stat.cookie not in self._flow_cookie_map: continue
+
+      cookie = self._flow_cookie_map[stat.cookie]
+      entry = self._find_flow_entry_cookie(cookie)
+      if entry is None: continue
+
+      new_stat = of.ofp_flow_stats()
+      new_stat.packet_count = stat.packet_count
+      new_stat.byte_count = stat.byte_count
+      new_stat.table_id = 0
+      new_stat.match = entry.match
+      new_stat.duration_sec = 0
+      new_stat.duration_nsec = 0
+      new_stat.priority = entry.priority
+      new_stat.idle_timeout = entry.idle_timeout
+      new_stat.hard_timeout = entry.hard_timeout
+      new_stat.cookie = entry.cookie
+      new_stat.actions = entry.actions
+      stats.append(new_stat)
+
+    reply = of.ofp_stats_reply(xid=global_xid, type=of.OFPST_FLOW, body=stats)
     self.send(reply)
     del self._stats_job_map[global_xid]
 
-    #for stat in event.stats:
+    #for stat in stats:
       #self.log.debug("Traffic: %s bytes, %s packets over %s cookie", stat.byte_count, stat.packet_count, stat.cookie)
 
   def _handle_openflow_PortStatsReceived (self, event):
