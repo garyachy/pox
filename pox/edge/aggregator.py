@@ -344,20 +344,13 @@ class Switch (object):
         actions.append(nx_reg_load(dst=NXM_NX_TUN_IPV4_DST(osw.ip)))
         actions.append(ofp_action_output(port=self.tun_port))
 
-  def send_table (self, table):
-    """
-    Translate flow table from aggswitch to this actual switch
-    """
-
-    fms = []
-    fms.append(ofp_flow_mod_table_id(command=OFPFC_DELETE,
-                                     table_id=OPENFLOW_TABLE))
-
-    for entry in table.entries:
+  def _convert_flow_entries(self, entries, fms, command):
+    for entry in entries:
       #TODO: We should use cookie or something to associate entries in real
       #      tables with the entries in our own tables for statistics and such.
       fm = ofp_flow_mod_table_id()
       fms.append(fm)
+      fm.command = command
       fm.table_id = OPENFLOW_TABLE
       fm.priority = entry.priority
       fm.cookie = self.core._generate_cookie()
@@ -382,6 +375,18 @@ class Switch (object):
         else:
           fm.actions.append(a)
 
+
+  def send_table (self, table):
+    """
+    Translate flow table from aggswitch to this actual switch
+    """
+
+    fms = []
+    fms.append(ofp_flow_mod_table_id(command=OFPFC_DELETE,
+                                     table_id=OPENFLOW_TABLE))
+
+    self._convert_flow_entries(table.entries, fms, of.OFPFC_ADD)
+
     fm = ofp_flow_mod_table_id(table_id=OPENFLOW_TABLE)
     fm.priority = 0
     fm.actions.append(ofp_action_output(port=OFPP_CONTROLLER))
@@ -390,6 +395,18 @@ class Switch (object):
     data = b''.join(fm.pack() for fm in fms)
     self.connection.send(data)
     self.log.debug("Sent %s table entries", len(fms))
+
+  def remove_flows (self, flows):
+    """
+    Translate and remove flow table entries
+    """
+
+    fms = []
+    self._convert_flow_entries(flows, fms, of.OFPFC_DELETE)
+
+    data = b''.join(fm.pack() for fm in fms)
+    self.connection.send(data)
+    self.log.debug("Deleted %s table entries", len(fms))
 
   def disconnect (self):
     if self.connection:
@@ -687,6 +704,9 @@ class AggregateSwitch (ExpireMixin, SoftwareSwitchBase):
     Fired when our flow table has been modified
     """
     if event.removed:
+      for sw in self.switches.values():
+        sw.remove_flows(event.removed)
+
       for flow in event.removed:
         log.debug("Flow removed %d", flow.cookie)
       return
