@@ -362,6 +362,7 @@ class Switch (object):
       fm.priority = entry.priority
       fm.cookie = self.core._generate_cookie()
       self.core._flow_cookie_map[fm.cookie] = entry.cookie
+
       #TODO: flags, etc.?
 
       em = entry.match
@@ -591,7 +592,6 @@ class AggregateSwitch (ExpireMixin, SoftwareSwitchBase):
                           # actually goes with which IP.  We discover that.
 
     self.switches = {}    # dpid->Switch
-    self.table = {}       # MAC->(dpid,port)
 
     self._stats_xid_map = {}
     self._stats_job_map = {}
@@ -612,8 +612,6 @@ class AggregateSwitch (ExpireMixin, SoftwareSwitchBase):
 
     core.listen_to_dependencies(self)
 
-    self.table.addListenerByName("FlowTableModification", self._handle_flowmod)
-
     # How long between discovery attempts (backs off exponentially up to
     # MAX_DISCOVERY_BACKOFF)
     self.discovery_timer_period = 0.5
@@ -623,6 +621,13 @@ class AggregateSwitch (ExpireMixin, SoftwareSwitchBase):
   def _find_flow_entry_cookie(self, cookie):
     for entry in self.table.entries:
       if entry.cookie == cookie:
+        return entry
+
+    return None
+
+  def _find_flow_entry_match(self, match, priority):
+    for entry in self.table.entries:
+      if entry.is_matched_by(match=match, priority=priority, strict=True):
         return entry
 
     return None
@@ -677,23 +682,23 @@ class AggregateSwitch (ExpireMixin, SoftwareSwitchBase):
     sw,port_no = self.port_map_rev[gport_no]
     sw.send_packet_out(port_no, packet)
 
-  def _handle_flowmod (self, event):
+  def _handle_FlowTableModification (self, event):
     """
     Fired when our flow table has been modified
     """
+    if event.removed:
+      for flow in event.removed:
+        log.debug("Flow removed %d", flow.cookie)
+      return
+
     # We need to update our flow tables on the south side
     log.debug("Translating flow table")
 
-    for entry in self.table.entries:
-      # update the actions field in the matching flows
-      match = event.added[0].match
-      priority = event.added[0].priority
+    for flow in event.added:
+      entry = self._find_flow_entry_match(flow.match, flow.priority)
+      if entry is None: continue
 
-      if entry.is_matched_by(match=match, priority=priority, strict=True):
-        if event.added:
-          entry.cookie = self._generate_cookie()
-        if event.removed:
-          del self._flow_cookie_set[entry.cookie]
+      entry.cookie = self._generate_cookie()
 
     for sw in self.switches.values():
       sw.send_table(self.table)
