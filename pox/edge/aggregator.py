@@ -331,6 +331,7 @@ class Switch (object):
           #       For the moment, we'll just pretend things will be okay.
           fm.actions.append(a)
     else: # A plain old port
+      self.log.debug("Installing an action with a port %d", a.port)
       osw,out_port = self.core.port_map_rev.get(a.port,(None,None))
       if osw is None:
         # Don't know this switch?!
@@ -361,6 +362,7 @@ class Switch (object):
       em = entry.match
       fm.match = em.clone()
       if em.in_port is not None:
+        self.log.debug("Installing a flow for a match port %d", em.in_port)
         sw,in_port = self.core.port_map_rev.get(em.in_port,(None,None))
         if sw is not self:
           # This flow never originates on this switch -- forget it
@@ -669,13 +671,19 @@ class AggregateSwitch (ExpireMixin, SoftwareSwitchBase):
     sw.send_port_mod(port_no, port_mod.hw_addr, port_mod.config, port_mod.mask)
 
   def _stats_flow (self, ofp, connection):
-    #print "Received Flow Stats request"
-    #print ofp
     if len(self.switches) == 0: return
 
     self._stats_job_map[ofp.xid] = StatsJob(ofp.xid)
 
-    switch = self.switches.itervalues().next()
+    ofp.body.table_id = OPENFLOW_TABLE
+
+    switch = None
+    if ofp.body.match.in_port is not None:
+      switch,in_port = self.port_map_rev.get(ofp.body.match.in_port,(None,None))
+      ofp.body.match.in_port = in_port
+    else:
+      switch = self.switches.itervalues().next()
+
     switch.send_stats_request(ofp.body, ofp.xid)
 
   def _stats_port (self, ofp, connection):
@@ -869,8 +877,6 @@ class AggregateSwitch (ExpireMixin, SoftwareSwitchBase):
       self._update_port_agg(event.dpid, event.ofp.desc)
 
   def _handle_openflow_FlowStatsReceived (self, event):
-    #print "Received Flow Stats reply"
-    #print event.ofp[0]
     local_xid = event.ofp[0].xid
     global_xid = self._pop_global_xid(local_xid)
 
