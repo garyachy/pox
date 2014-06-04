@@ -116,6 +116,8 @@ from pox.datapaths import do_launch
 from pox.datapaths.switch import SoftwareSwitchBase, OFConnection
 from pox.datapaths.switch import ExpireMixin
 import logging
+import sys
+import time
 
 
 # For the metadata in tun_id, we set up a bunch of handy "constants"...
@@ -140,7 +142,7 @@ OPENFLOW_TABLE = 2
 # Aggregator
 
 AGG_MAX_PORT_NUMBER = 1000
-AGG_MAX_FLOW_NUMBER = 10000
+MAX_COOKIE = sys.maxint
 
 
 
@@ -354,8 +356,8 @@ class Switch (object):
       fm.command = command
       fm.table_id = OPENFLOW_TABLE
       fm.priority = entry.priority
-      fm.cookie = self.core._generate_cookie()
-      self.core._flow_cookie_map[fm.cookie] = entry.cookie
+      fm.cookie = self.core._generate_cookie.next()
+      self.core._cookie_map[fm.cookie] = entry.cookie
 
       #TODO: flags, etc.?
 
@@ -551,7 +553,6 @@ class Switch (object):
         # if it's being sent to a port, it should have been handled at the
         # switch!
         self.log.warn("Got non-discovery from tunnel at controller")
-        #print event.ofp
       return
 
     # Translate in_port
@@ -564,13 +565,20 @@ class Switch (object):
     self.log.debug("Translated packet-in")
 
 class StatsJob (object):
+  """
+  Represents a statistics request got by aggregator
+  from north controller.
+
+  Contains XIDs of generated statistics requests sent to switches on south.
+  Also contains aggregated statistics list collected from several switches.
+  """
   def __init__ (self, global_xid):
     """
     Create a StatsJob instance
     """
     self._local_xid_map = set()
     self._global_xid = global_xid
-    self.port_stats = []
+    self.stats = []
 
   def add_local_xid (self, local_xid):
     """
@@ -589,6 +597,21 @@ class StatsJob (object):
     Check if local xid set is empty
     """
     return (len(self._local_xid_map) == 0)
+
+  def update_flow_stats(self, stat, entry):
+      new_stat = of.ofp_flow_stats()
+      new_stat.packet_count = stat.packet_count
+      new_stat.byte_count = stat.byte_count
+      new_stat.table_id = 0
+      new_stat.match = entry.match
+      new_stat.duration_sec = time.time() - entry.last_touched
+      new_stat.duration_nsec = 0
+      new_stat.priority = entry.priority
+      new_stat.idle_timeout = entry.idle_timeout
+      new_stat.hard_timeout = entry.hard_timeout
+      new_stat.cookie = entry.cookie
+      new_stat.actions = entry.actions
+      self.stats.append(new_stat)
 
 class AggregateSwitch (ExpireMixin, SoftwareSwitchBase):
   # Default level for loggers of this class
@@ -612,11 +635,11 @@ class AggregateSwitch (ExpireMixin, SoftwareSwitchBase):
 
     self.switches = {}    # dpid->Switch
 
-    self._stats_xid_map = {}
-    self._stats_job_map = {}
+    self._stats_xid_map = {} # south xid -> north xid
+    self._stats_job_map = {} # dictionary of StatsJob entries with xid as a key
 
-    self._flow_cookie_map = {}
-    self._flow_cookie_set = set()
+    self._cookie_map = {} # south cookie -> north cookie
+    self._generate_cookie = self._cookie_generator()
 
     log_level = kw.pop('log_level', self.default_log_level)
 
@@ -637,27 +660,36 @@ class AggregateSwitch (ExpireMixin, SoftwareSwitchBase):
 
     self._send_discovery()
 
-  def _find_flow_entry_cookie(self, cookie):
+  def _find_entry_by_cookie(self, cookie):
+    """
+    Find an entry in FlowTable using cookie
+    """
     for entry in self.table.entries:
       if entry.cookie == cookie:
         return entry
 
     return None
 
-  def _find_flow_entry_match(self, match, priority):
+  def _find_entry_by_match(self, match, priority):
+    """
+    Find an entry in FlowTable using match and priority
+    """
     for entry in self.table.entries:
       if entry.is_matched_by(match=match, priority=priority, strict=True):
         return entry
 
     return None
 
-  def _generate_cookie(self):
-    for i in range(1, AGG_MAX_FLOW_NUMBER):
-      if i not in self._flow_cookie_set:
-        self._flow_cookie_set.add(i)
-        return i
-
-    return None
+  def _cookie_generator (self, start = 1, stop = MAX_COOKIE):
+    """
+    Returns a cookie generator object
+    """
+    i = start
+    while True:
+      yield i
+      i += 1
+      if i == stop:
+        i = start
 
   def _rx_port_mod (self, port_mod, connection):
     gport = port_mod.port_no
@@ -723,10 +755,10 @@ class AggregateSwitch (ExpireMixin, SoftwareSwitchBase):
     log.debug("Translating flow table")
 
     for flow in event.added:
-      entry = self._find_flow_entry_match(flow.match, flow.priority)
+      entry = self._find_entry_by_match(flow.match, flow.priority)
       if entry is None: continue
 
-      entry.cookie = self._generate_cookie()
+      entry.cookie = self._generate_cookie.next()
 
     for sw in self.switches.values():
       sw.send_table(self.table)
@@ -865,8 +897,6 @@ class AggregateSwitch (ExpireMixin, SoftwareSwitchBase):
       self.switches[event.dpid].disconnect()
 
   def _handle_openflow_PortStatus (self, event):
-    #print event.ofp
-
     if event.added:
       self._add_port_agg(event.dpid, event.ofp.desc)
 
@@ -880,35 +910,23 @@ class AggregateSwitch (ExpireMixin, SoftwareSwitchBase):
     local_xid = event.ofp[0].xid
     global_xid = self._pop_global_xid(local_xid)
 
-    stats = []
+    self._stats_job_map[global_xid].remove_local_xid(local_xid)
+
+    stats = self._stats_job_map[global_xid].stats
 
     for stat in event.stats:
-      if stat.cookie not in self._flow_cookie_map: continue
+      if stat.cookie not in self._cookie_map: continue
 
-      cookie = self._flow_cookie_map[stat.cookie]
-      entry = self._find_flow_entry_cookie(cookie)
+      cookie = self._cookie_map[stat.cookie]
+      entry = self._find_entry_by_cookie(cookie)
       if entry is None: continue
 
-      new_stat = of.ofp_flow_stats()
-      new_stat.packet_count = stat.packet_count
-      new_stat.byte_count = stat.byte_count
-      new_stat.table_id = 0
-      new_stat.match = entry.match
-      new_stat.duration_sec = 0
-      new_stat.duration_nsec = 0
-      new_stat.priority = entry.priority
-      new_stat.idle_timeout = entry.idle_timeout
-      new_stat.hard_timeout = entry.hard_timeout
-      new_stat.cookie = entry.cookie
-      new_stat.actions = entry.actions
-      stats.append(new_stat)
+      self._stats_job_map[global_xid].update_flow_stats(stat, entry)
 
-    reply = of.ofp_stats_reply(xid=global_xid, type=of.OFPST_FLOW, body=stats)
-    self.send(reply)
-    del self._stats_job_map[global_xid]
-
-    #for stat in stats:
-      #self.log.debug("Traffic: %s bytes, %s packets over %s cookie", stat.byte_count, stat.packet_count, stat.cookie)
+    if self._stats_job_map[global_xid].is_empty() is True:
+      reply = of.ofp_stats_reply(xid=global_xid, type=of.OFPST_FLOW, body=stats)
+      self.send(reply)
+      del self._stats_job_map[global_xid]
 
   def _handle_openflow_PortStatsReceived (self, event):
     local_xid = event.ofp[0].xid
@@ -919,14 +937,11 @@ class AggregateSwitch (ExpireMixin, SoftwareSwitchBase):
     for stat in event.stats:
       stat.port_no = self._port_to_gport(event.dpid, stat.port_no)
       if stat.port_no is None: continue
-      self._stats_job_map[global_xid].port_stats.append(stat)
-
-    #for stat in self._port_stats:
-      #log.info("Traffic: %s rx_packets, %s tx_packets over %s port", stat.rx_packets, stat.tx_packets, stat.port_no)
+      self._stats_job_map[global_xid].stats.append(stat)
 
     if self._stats_job_map[global_xid].is_empty() is True:
-      self._stats_job_map[global_xid].port_stats = sorted(self._stats_job_map[global_xid].port_stats, key=lambda stat: stat.port_no)
-      reply = of.ofp_stats_reply(xid=global_xid, type=of.OFPST_PORT, body=self._stats_job_map[global_xid].port_stats)
+      self._stats_job_map[global_xid].stats = sorted(self._stats_job_map[global_xid].stats, key=lambda stat: stat.port_no)
+      reply = of.ofp_stats_reply(xid=global_xid, type=of.OFPST_PORT, body=self._stats_job_map[global_xid].stats)
       self.send(reply)
       del self._stats_job_map[global_xid]
 
