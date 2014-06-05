@@ -118,6 +118,7 @@ from pox.datapaths.switch import ExpireMixin
 import logging
 import sys
 import time
+from collections import defaultdict
 
 
 # For the metadata in tun_id, we set up a bunch of handy "constants"...
@@ -360,6 +361,7 @@ class Switch (object):
       fm.priority = entry.priority
       fm.cookie = self.core._generate_cookie.next()
       self.core._cookie_map[fm.cookie] = entry.cookie
+      self.core.cookie_map_rev[entry.cookie][self.dpid] = fm.cookie
 
       #TODO: flags, etc.?
 
@@ -407,12 +409,12 @@ class Switch (object):
     Translate and remove flow table entries
     """
 
-    fms = []
-    self._convert_flow_entries(flows, fms, of.OFPFC_DELETE)
+    #fms = []
+    #self._convert_flow_entries(flows, fms, of.OFPFC_DELETE)
 
-    data = b''.join(fm.pack() for fm in fms)
-    self.connection.send(data)
-    self.log.debug("Deleted %s table entries", len(fms))
+    #data = b''.join(fm.pack() for fm in fms)
+    #self.connection.send(data)
+    #self.log.debug("Deleted %s table entries", len(fms))
 
   def disconnect (self):
     if self.connection:
@@ -603,20 +605,27 @@ class StatsJob (object):
     """
     return (len(self._local_xid_map) == 0)
 
+  def _find_stat_by_cookie(self, cookie):
+    """
+    Find an stat in stats using cookie
+    """
+    for stat in self.stats:
+      if stat.cookie == cookie:
+        return stat
+
+    return None
+
   def update_flow_stats(self, stat, entry):
-      new_stat = of.ofp_flow_stats()
-      new_stat.packet_count = stat.packet_count
-      new_stat.byte_count = stat.byte_count
-      new_stat.table_id = 0
-      new_stat.match = entry.match
-      new_stat.duration_sec = time.time() - entry.last_touched
-      new_stat.duration_nsec = 0
-      new_stat.priority = entry.priority
-      new_stat.idle_timeout = entry.idle_timeout
-      new_stat.hard_timeout = entry.hard_timeout
-      new_stat.cookie = entry.cookie
-      new_stat.actions = entry.actions
+    """
+    Accumulates statistics for a particular flow entry
+    """
+    new_stat = self._find_stat_by_cookie(entry.cookie)
+    if new_stat == None:
+      new_stat = entry.flow_stats()
       self.stats.append(new_stat)
+
+    new_stat.packet_count += stat.packet_count
+    new_stat.byte_count += stat.byte_count
 
 class AggregateSwitch (ExpireMixin, SoftwareSwitchBase):
   # Default level for loggers of this class
@@ -644,6 +653,7 @@ class AggregateSwitch (ExpireMixin, SoftwareSwitchBase):
     self._stats_job_map = {} # dictionary of StatsJob entries with xid as a key
 
     self._cookie_map = {} # south cookie -> north cookie
+    self.cookie_map_rev = defaultdict(dict) # north cookie -> dpid -> south cookie
     self._generate_cookie = self._cookie_generator()
 
     log_level = kw.pop('log_level', self.default_log_level)
@@ -714,14 +724,10 @@ class AggregateSwitch (ExpireMixin, SoftwareSwitchBase):
 
     ofp.body.table_id = OPENFLOW_TABLE
 
-    switch = None
-    if ofp.body.match.in_port is not None:
-      switch,in_port = self.port_map_rev.get(ofp.body.match.in_port,(None,None))
-      ofp.body.match.in_port = in_port
-    else:
-      switch = self.switches.itervalues().next()
+    entry = self._find_entry_by_match(ofp.body.match, of.OFP_DEFAULT_PRIORITY)
 
-    switch.send_stats_request(ofp.body, ofp.xid)
+    for dpid in self.cookie_map_rev[entry.cookie].keys():
+      self.switches[dpid].send_stats_request(ofp.body, ofp.xid)
 
   def _stats_port (self, ofp, connection):
     if len(self.switches) == 0: return
