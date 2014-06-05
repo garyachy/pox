@@ -312,18 +312,20 @@ class Switch (object):
 
   def _convert_action_output (self, a, actions):
     if a.port >= OFPP_MAX: # Off by one?
-        if a.port == OFPP_ALL or a.port == OFPP_FLOOD:
+        if a.port == of.OFPP_ALL or a.port == of.OFPP_FLOOD:
           #FIXME: If we don't propagate the port config bits to the actual
           #       ports, we probably need to translate them here.
           #FIXME: We can't actually use ALL here because that'd send to
           #       the tunnel port, which is not what we want.  We should
           #       break it out into individual output actions, but we
           #       currently just do FLOOD when told to do ALL.
-          actions.append(ofp_action_output(port=FLOOD))
-          p = MALL if a.port == OFPP_ALL else MFLOOD
+          actions.append(ofp_action_output(port=of.OFPP_FLOOD))
+          p = MALL if a.port == of.OFPP_ALL else MFLOOD
           actions.append(nx_reg_load(value=p, dst=NXM_NX_TUN_ID))
-          for rsw in self.core.switches:
-            if rsw.ip is None: return
+          for rsw in self.core.switches.values():
+            if rsw.ip == None: continue
+            if rsw.dpid == self.dpid: continue
+
             actions.append(nx_reg_load(dst=NXM_NX_TUN_IPV4_DST(rsw.ip)))
             actions.append(ofp_action_output(port=self.tun_port))
         else:
@@ -536,6 +538,9 @@ class Switch (object):
         self.log.warn("Tunnel IP changed")
       self.ip = event.ofp.match.tun_ipv4_dst
       self.log.debug("Discovered that tunnel is %s", self.ip)
+      self.log.debug("Updating tables for all switches")
+      for sw in self.core.switches.values():
+        sw.send_table(self.core.table)
 
   def _handle_PacketIn (self, event):
     if not self.ready: return
