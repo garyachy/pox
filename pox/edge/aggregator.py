@@ -273,7 +273,9 @@ class Switch (object):
     if not self.ready: return
 
     request = of.ofp_stats_request(body=body)
+
     self.core._stats_xid_map[request.xid] = parent_xid
+    self.log.debug("Sending stats request, xid %d", request.xid)
     self.connection.send(request)
 
     self.core._stats_job_map[parent_xid].add_local_xid(request.xid)
@@ -622,6 +624,7 @@ class StatsJob (object):
     new_stat = self._find_stat_by_cookie(entry.cookie)
     if new_stat == None:
       new_stat = entry.flow_stats()
+      log.debug("Creating new stat entry: cookie %d",  new_stat.cookie)
       self.stats.append(new_stat)
 
     new_stat.packet_count += stat.packet_count
@@ -724,10 +727,20 @@ class AggregateSwitch (ExpireMixin, SoftwareSwitchBase):
 
     ofp.body.table_id = OPENFLOW_TABLE
 
-    entry = self._find_entry_by_match(ofp.body.match, of.OFP_DEFAULT_PRIORITY)
+    in_port = ofp.body.match.in_port
+    out_port = ofp.body.out_port
 
-    for dpid in self.cookie_map_rev[entry.cookie].keys():
-      self.switches[dpid].send_stats_request(ofp.body, ofp.xid)
+    if out_port != of.OFPP_NONE:
+      #TODO: Not clear what to do with tunnels
+      pass
+    elif in_port is not None:
+      switch,local_port = self.port_map_rev[in_port]
+      ofp.body.match._in_port = local_port
+      switch.send_stats_request(ofp.body, ofp.xid)
+    else:
+      for switch in self.switches.values():
+        switch.send_stats_request(ofp.body, ofp.xid)
+
 
   def _stats_port (self, ofp, connection):
     if len(self.switches) == 0: return
@@ -918,25 +931,41 @@ class AggregateSwitch (ExpireMixin, SoftwareSwitchBase):
       self._update_port_agg(event.dpid, event.ofp.desc)
 
   def _handle_openflow_FlowStatsReceived (self, event):
+
     local_xid = event.ofp[0].xid
     global_xid = self._pop_global_xid(local_xid)
+
+    self.log.debug("_handle_openflow_FlowStatsReceived : dpid %d, south xid %d, north xid %d",
+                   event.dpid, local_xid, global_xid)
 
     self._stats_job_map[global_xid].remove_local_xid(local_xid)
 
     stats = self._stats_job_map[global_xid].stats
 
+    if not event.stats:
+      self.log.debug("Stats list is empty")
+
     for stat in event.stats:
-      if stat.cookie not in self._cookie_map: continue
+      if stat.cookie not in self._cookie_map:
+        self.log.debug("South cookie %d does not map to a north one", stat.cookie)
+        continue
 
       cookie = self._cookie_map[stat.cookie]
       entry = self._find_entry_by_cookie(cookie)
-      if entry is None: continue
+      if entry is None:
+        self.log.debug("North cookie %d does not map to an entry", cookie)
+        continue
+
+      self.log.debug("Updating flow stats : dpid %d, south cookie %d, north cookie %d, packet_count %d",
+                     event.dpid, stat.cookie, cookie, stat.packet_count)
 
       self._stats_job_map[global_xid].update_flow_stats(stat, entry)
 
     if self._stats_job_map[global_xid].is_empty() is True:
-      reply = of.ofp_stats_reply(xid=global_xid, type=of.OFPST_FLOW, body=stats)
-      self.send(reply)
+      if stats:
+        reply = of.ofp_stats_reply(xid=global_xid, type=of.OFPST_FLOW, body=stats)
+        self.send(reply)
+        log.debug("Sending flow stats reply: xid %d", global_xid)
       del self._stats_job_map[global_xid]
 
   def _handle_openflow_PortStatsReceived (self, event):
