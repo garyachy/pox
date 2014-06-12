@@ -588,6 +588,7 @@ class StatsJob (object):
     self._local_xid_map = set()
     self._global_xid = global_xid
     self.stats = []
+    self.cookies = set()
 
   def add_local_xid (self, local_xid):
     """
@@ -727,13 +728,18 @@ class AggregateSwitch (ExpireMixin, SoftwareSwitchBase):
 
     ofp.body.table_id = OPENFLOW_TABLE
 
+    match  = ofp.body.match
     in_port = ofp.body.match.in_port
-    out_port = ofp.body.out_port
+    out_port = None
+    if ofp.body.out_port != of.OFPP_NONE:
+      out_port = ofp.body.out_port
 
-    if out_port != of.OFPP_NONE:
-      #TODO: Not clear what to do with tunnels
-      pass
-    elif in_port is not None:
+    for entry in self.table.entries:
+      if entry.is_matched_by(match=match, out_port=out_port):
+        self.log.debug("Found entry: cookie %d", entry.cookie)
+        self._stats_job_map[ofp.xid].cookies.add(entry.cookie)
+
+    if in_port is not None:
       switch,local_port = self.port_map_rev[in_port]
       ofp.body.match._in_port = local_port
       switch.send_stats_request(ofp.body, ofp.xid)
@@ -951,6 +957,11 @@ class AggregateSwitch (ExpireMixin, SoftwareSwitchBase):
         continue
 
       cookie = self._cookie_map[stat.cookie]
+
+      if cookie not in  self._stats_job_map[global_xid].cookies:
+        self.log.debug("North cookie %d is not present in StatsJob cookies set", cookie)
+        continue
+
       entry = self._find_entry_by_cookie(cookie)
       if entry is None:
         self.log.debug("North cookie %d does not map to an entry", cookie)
