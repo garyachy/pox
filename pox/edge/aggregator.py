@@ -361,9 +361,10 @@ class Switch (object):
       fm.command = command
       fm.table_id = OPENFLOW_TABLE
       fm.priority = entry.priority
-      fm.cookie = self.core._generate_cookie.next()
-      self.core._cookie_map[fm.cookie] = entry.cookie
-      self.core.cookie_map_rev[entry.cookie][self.dpid] = fm.cookie
+      if command != of.OFPFC_DELETE:
+        fm.cookie = self.core._generate_cookie.next()
+        self.core._cookie_map[fm.cookie] = entry.cookie
+        self.core.cookie_map_rev[entry.cookie][self.dpid] = fm.cookie
 
       #TODO: flags, etc.?
 
@@ -411,12 +412,12 @@ class Switch (object):
     Translate and remove flow table entries
     """
 
-    #fms = []
-    #self._convert_flow_entries(flows, fms, of.OFPFC_DELETE)
+    fms = []
+    self._convert_flow_entries(flows, fms, of.OFPFC_DELETE)
 
-    #data = b''.join(fm.pack() for fm in fms)
-    #self.connection.send(data)
-    #self.log.debug("Deleted %s table entries", len(fms))
+    data = b''.join(fm.pack() for fm in fms)
+    self.connection.send(data)
+    self.log.debug("Deleted %s table entries", len(fms))
 
   def disconnect (self):
     if self.connection:
