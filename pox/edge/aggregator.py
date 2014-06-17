@@ -336,7 +336,8 @@ class Switch (object):
           #       We need special handling for IN_PORT (in case the
           #       in port is the tunnel).  What about the rest of them?
           #       For the moment, we'll just pretend things will be okay.
-          fm.actions.append(a)
+          self.log.debug("Interesting action port %d", a.port)
+          actions.append(a)
     else: # A plain old port
       self.log.debug("Installing an action with a port %d", a.port)
       osw,out_port = self.core.port_map_rev.get(a.port,(None,None))
@@ -352,19 +353,16 @@ class Switch (object):
         actions.append(nx_reg_load(dst=NXM_NX_TUN_IPV4_DST(osw.ip)))
         actions.append(ofp_action_output(port=self.tun_port))
 
-  def _convert_flow_entries(self, entries, fms, command):
+  def _convert_flow_entries(self, entries, fms):
     for entry in entries:
-      #TODO: We should use cookie or something to associate entries in real
-      #      tables with the entries in our own tables for statistics and such.
       fm = ofp_flow_mod_table_id()
       fms.append(fm)
-      fm.command = command
+      fm.command = of.OFPFC_ADD
       fm.table_id = OPENFLOW_TABLE
       fm.priority = entry.priority
-      if command != of.OFPFC_DELETE:
-        fm.cookie = self.core._generate_cookie.next()
-        self.core._cookie_map[fm.cookie] = entry.cookie
-        self.core.cookie_map_rev[entry.cookie][self.dpid] = fm.cookie
+      fm.cookie = self.core._generate_cookie.next()
+      self.core._cookie_map[fm.cookie] = entry.cookie
+      self.core.cookie_map_rev[entry.cookie][self.dpid] = fm.cookie
 
       #TODO: flags, etc.?
 
@@ -396,7 +394,7 @@ class Switch (object):
     fms.append(ofp_flow_mod_table_id(command=OFPFC_DELETE,
                                      table_id=OPENFLOW_TABLE))
 
-    self._convert_flow_entries(table.entries, fms, of.OFPFC_ADD)
+    self._convert_flow_entries(table.entries, fms)
 
     fm = ofp_flow_mod_table_id(table_id=OPENFLOW_TABLE)
     fm.priority = 0
@@ -407,17 +405,17 @@ class Switch (object):
     self.connection.send(data)
     self.log.debug("Sent %s table entries", len(fms))
 
-  def remove_flows (self, flows):
+  def remove_flow (self, cookie):
     """
-    Translate and remove flow table entries
+    Remove flow by cookie match
     """
+    self.log.debug("Deleting flow: cookie %d", cookie)
 
-    fms = []
-    self._convert_flow_entries(flows, fms, of.OFPFC_DELETE)
-
-    data = b''.join(fm.pack() for fm in fms)
-    self.connection.send(data)
-    self.log.debug("Deleted %s table entries", len(fms))
+    msg = nx_flow_mod()
+    msg.table_id = OPENFLOW_TABLE
+    msg.match.cookie = cookie
+    msg.command = of.OFPFC_DELETE
+    self.connection.send(msg)
 
   def disconnect (self):
     if self.connection:
@@ -731,6 +729,8 @@ class AggregateSwitch (ExpireMixin, SoftwareSwitchBase):
 
     match  = ofp.body.match
     in_port = ofp.body.match.in_port
+
+    #TODO: Optimize by using stats request format that supports cookie
     out_port = None
     if ofp.body.out_port != of.OFPP_NONE:
       out_port = ofp.body.out_port
@@ -775,11 +775,14 @@ class AggregateSwitch (ExpireMixin, SoftwareSwitchBase):
     Fired when our flow table has been modified
     """
     if event.removed:
-      for sw in self.switches.values():
-        sw.remove_flows(event.removed)
-
       for flow in event.removed:
-        log.debug("Flow removed %d", flow.cookie)
+        log.debug("Removing aggregator flow %d", flow.cookie)
+
+        for dpid,south_cookie in self.cookie_map_rev[flow.cookie].iteritems():
+          self.switches[dpid].remove_flow(south_cookie)
+          del self._cookie_map[south_cookie]
+
+        del self.cookie_map_rev[flow.cookie]
       return
 
     # We need to update our flow tables on the south side
