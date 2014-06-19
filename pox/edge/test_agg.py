@@ -50,14 +50,14 @@ def _handle_PortStats (event):
 
 def _timer_func ():
   for connection in core.openflow._connections.values():
-    connection.send(of.ofp_stats_request(body=of.ofp_flow_stats_request()))
-    connection.send(of.ofp_stats_request(body=of.ofp_port_stats_request()))
-
     match = of.ofp_match()
-    match.in_port = 2
+    #match.in_port = 2
+    out_port = of.OFPP_NONE
 
-    if match.is_wildcarded:
-      connection.send(of.ofp_stats_request(body=of.ofp_flow_stats_request(match=match)))
+    connection.send(of.ofp_stats_request(body=of.ofp_flow_stats_request(match=match, out_port=out_port)))
+
+    #connection.send(of.ofp_stats_request(body=of.ofp_port_stats_request()))
+
 
 def launch ():
   core.openflow.addListenerByName("ConnectionUp", _handle_ConnectionUp)

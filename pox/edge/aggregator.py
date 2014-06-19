@@ -633,6 +633,7 @@ class StatsJob (object):
 class AggregateSwitch (ExpireMixin, SoftwareSwitchBase):
   # Default level for loggers of this class
   default_log_level = logging.DEBUG
+  #default_log_level = logging.INFO
 
   MAX_DISCOVERY_BACKOFF = 10
 
@@ -793,6 +794,21 @@ class AggregateSwitch (ExpireMixin, SoftwareSwitchBase):
       if entry is None: continue
 
       entry.cookie = self._generate_cookie.next()
+
+    for sw in self.switches.values():
+      sw.send_table(self.table)
+
+  def _flow_mod_modify (self, flow_mod, connection, table, strict=False):
+    """
+    Process an OFPFC_MODIFY flow mod sent to the switch.
+    """
+    match = flow_mod.match
+    priority = flow_mod.priority
+
+    for entry in table.entries:
+      # update the actions field in the matching flows
+      if entry.is_matched_by(match, priority=priority, strict=strict):
+        entry.actions = flow_mod.actions
 
     for sw in self.switches.values():
       sw.send_table(self.table)
