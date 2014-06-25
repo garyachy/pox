@@ -142,7 +142,7 @@ OPENFLOW_TABLE = 2
 
 # Aggregator
 
-AGG_MAX_PORT_NUMBER = 1000
+MAX_PORT_NUMBER = 16
 MAX_COOKIE = sys.maxint
 
 
@@ -336,7 +336,7 @@ class Switch (object):
           #       We need special handling for IN_PORT (in case the
           #       in port is the tunnel).  What about the rest of them?
           #       For the moment, we'll just pretend things will be okay.
-          self.log.debug("Interesting action port %d", a.port)
+          #self.log.debug("Interesting action port %d", a.port)
           actions.append(a)
     else: # A plain old port
       self.log.debug("Installing an action with a port %d", a.port)
@@ -817,10 +817,9 @@ class AggregateSwitch (ExpireMixin, SoftwareSwitchBase):
     """
     Generates a global port number
     """
-    for i in range(1, AGG_MAX_PORT_NUMBER):
-      if i not in self.port_map_rev: return i
+    gport = port.port_no + (switch.dpid - 1) * MAX_PORT_NUMBER
 
-    return None
+    return gport
 
   def add_interface (self, switch, port):
     """
