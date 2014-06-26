@@ -570,7 +570,7 @@ class Switch (object):
       return
 
     self.core.rx_packet(event.parsed, in_port, event.data)
-    self.log.debug("Translated packet-in")
+    self.log.debug("Translated packet-in: in_port %d", in_port)
 
 class StatsJob (object):
   """
@@ -741,7 +741,7 @@ class AggregateSwitch (ExpireMixin, SoftwareSwitchBase):
         self.log.debug("Found entry: cookie %d", entry.cookie)
         self._stats_job_map[ofp.xid].cookies.add(entry.cookie)
 
-    if in_port is not None:
+    if in_port in self.port_map_rev:
       switch,local_port = self.port_map_rev[in_port]
       ofp.body.match._in_port = local_port
       switch.send_stats_request(ofp.body, ofp.xid)
@@ -992,10 +992,9 @@ class AggregateSwitch (ExpireMixin, SoftwareSwitchBase):
       self._stats_job_map[global_xid].update_flow_stats(stat, entry)
 
     if self._stats_job_map[global_xid].is_empty() is True:
-      if stats:
-        reply = of.ofp_stats_reply(xid=global_xid, type=of.OFPST_FLOW, body=stats)
-        self.send(reply)
-        log.debug("Sending flow stats reply: xid %d", global_xid)
+      reply = of.ofp_stats_reply(xid=global_xid, type=of.OFPST_FLOW, body=stats)
+      self.send(reply)
+      log.debug("Sending flow stats reply: xid %d", global_xid)
       del self._stats_job_map[global_xid]
 
   def _handle_openflow_PortStatsReceived (self, event):
