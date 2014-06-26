@@ -713,10 +713,12 @@ class AggregateSwitch (ExpireMixin, SoftwareSwitchBase):
   def _rx_port_mod (self, port_mod, connection):
     gport = port_mod.port_no
     if gport not in self.port_map_rev:
-      self.send_error(type=OFPET_PORT_MOD_FAILED, code=OFPPMFC_BAD_PORT,
+      self.send_error(type=of.OFPET_PORT_MOD_FAILED, code=of.OFPPMFC_BAD_PORT,
                       ofp=port_mod, connection=connection)
       self.log.debug("Port %d is unknown to Aggregator", port_mod.port_no)
       return
+
+    super(AggregateSwitch, self)._rx_port_mod(port_mod, connection)
 
     sw,port_no = self.port_map_rev[gport]
     sw.send_port_mod(port_no, port_mod.hw_addr, port_mod.config, port_mod.mask)
