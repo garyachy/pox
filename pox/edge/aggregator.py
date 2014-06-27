@@ -714,6 +714,8 @@ class AggregateSwitch (ExpireMixin, SoftwareSwitchBase):
     """
     i = start
     while True:
+      while (i in self.cookie_map_rev or i in self._cookie_map):
+        i += 1
       yield i
       i += 1
       if i == stop:
@@ -795,6 +797,8 @@ class AggregateSwitch (ExpireMixin, SoftwareSwitchBase):
           del self._cookie_map[south_cookie]
 
         del self.cookie_map_rev[flow.cookie]
+
+      super(AggregateSwitch, self)._handle_FlowTableModification(event)
       return
 
     # We need to update our flow tables on the south side
@@ -804,7 +808,8 @@ class AggregateSwitch (ExpireMixin, SoftwareSwitchBase):
       entry = self._find_entry_by_match(flow.match, flow.priority)
       if entry is None: continue
 
-      entry.cookie = self._generate_cookie.next()
+      if (entry.cookie == 0):
+        entry.cookie = self._generate_cookie.next()
 
     for sw in self.switches.values():
       sw.send_table(self.table)
