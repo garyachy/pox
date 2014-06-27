@@ -332,12 +332,15 @@ class Switch (object):
             actions.append(nx_reg_load(dst=NXM_NX_TUN_IPV4_DST(rsw.ip)))
             actions.append(ofp_action_output(port=self.tun_port))
         else:
-          #FIXME: LOCAL is meaningless and should probaby be stripped.
-          #       We need special handling for IN_PORT (in case the
-          #       in port is the tunnel).  What about the rest of them?
-          #       For the moment, we'll just pretend things will be okay.
-          #self.log.debug("Interesting action port %d", a.port)
-          actions.append(a)
+          if a.port == OFPP_CONTROLLER:
+            actions.append(ofp_action_output(port=OFPP_CONTROLLER))
+          else:
+            # FIXME: LOCAL is meaningless and should probaby be stripped.
+            #       We need special handling for IN_PORT (in case the
+            #       in port is the tunnel).  What about the rest of them?
+            #       For the moment, we'll just pretend things will be okay.
+            self.log.debug("Unsupported action port %d", a.port)
+            actions.append(a)
     else: # A plain old port
       self.log.debug("Installing an action with a port %d", a.port)
       osw,out_port = self.core.port_map_rev.get(a.port,(None,None))
