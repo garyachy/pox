@@ -492,6 +492,12 @@ class Switch (object):
       if port.port_no not in self.ports:
         self.ports[port.port_no] = self.core.add_interface(self, port)
 
+        # Enable flooding on regular ports
+        self.connection.send(ofp_port_mod(port_no = port.port_no,
+                  hw_addr = port.hw_addr,
+                  config  = 0,
+                  mask    = OFPPC_NO_FLOOD))
+
     return do_setup
 
   def delete_port (self, port):
