@@ -599,7 +599,7 @@ class OVSDBConnection (EventMixin):
     #self.transact('Open_vSwitch', stm).callback(log.warn)
 
   def _send (self, msg):
-    #print "SEND",to_raw_json(msg, pretty=True)
+    print "SEND",to_raw_json(msg, pretty=True)
     self._worker.send(to_raw_json(msg))
 
 
@@ -797,7 +797,68 @@ def launch (connect_back = False, listen = False):
     log.warn("Neither connect-back nor listening enabled.")
     log.warn("(You may want to see pox.py help --ovsdb)")
 
+class OVSDBAdapter ():
+  def __init__ (self,):
+    self._connection = None
+    self._switch_uuid = None
+    self._bridges_array = []
+    self._bridge_name = None
 
+  def connect (self, connection):
+    self._connection = connection
+
+  def query_switch(self):
+    def first_result (result):
+      log.info("Found %s switches on this OVSDB:", len(result[0].rows))
+
+      for row in result[0].rows:
+        self._switch_uuid = row._uuid[1]
+        log.info("  %s", row._uuid[1])
+        log.info("  %s", self._switch_uuid)
+
+      self.query_dpids()
+
+    self._connection.transact('Open_vSwitch',
+        SELECT|'_uuid'|FROM|'Open_vSwitch'
+        ).callback(first_result)
+
+  def query_dpids(self):
+    def final_result (result):
+      log.info("Found %s bridges on this OVSDB:", len(result[0].rows))
+
+      for row in result[0].rows:
+        self._bridges_array.append(["uuid", row._uuid[1]])
+        log.info("  %s : %s, %s", row.datapath_id, row.name, row._uuid[1])
+
+      self.insert_bridge_Bridge()
+
+    self._connection.transact('Open_vSwitch',
+        SELECT|'name'|AND|'datapath_id'|AND|'_uuid'|FROM|'Bridge'
+        ).callback(final_result)
+
+  def insert_bridge_Bridge(self):
+      bridge_uuid = 'new_bridge'
+      interface_uuid = 'new_interface'
+      port_uuid = 'new_port'
+
+      self._bridges_array.append(['named-uuid', bridge_uuid])
+
+      open_vSwitchRow = {'bridges': ['set', self._bridges_array]}
+      bridgeRow = {'name': self._bridge_name, 'ports':['named-uuid', port_uuid]}
+      portRow = {'name': self._bridge_name, 'interfaces': ['named-uuid', interface_uuid]}
+      interfaceRow = {'name': self._bridge_name, 'type':'internal'}
+
+      self._connection.transact('Open_vSwitch',
+        UPDATE|'Open_vSwitch'|WHERE|'_uuid'|EQUAL|['uuid', self._switch_uuid]|WITH|open_vSwitchRow,
+        INSERT|portRow|INTO|'Port'|WITH|UUID_NAME|port_uuid,
+        INSERT|bridgeRow|INTO|'Bridge'|WITH|UUID_NAME|bridge_uuid,
+        INSERT|interfaceRow|INTO|'Interface'|WITH|UUID_NAME|interface_uuid)
+
+  def insert_bridge(self, bridge_name):
+    self._bridge_name = bridge_name
+    self.query_switch()
+
+adapter = OVSDBAdapter()
 
 def example ():
   """
@@ -815,11 +876,17 @@ def example ():
         SELECT|'name'|AND|'datapath_id'|FROM|'Bridge'
         ).callback(show_result)
 
+  def onConnectionUp (event):
+    query_dpids(event)
+    adapter.connect(event.connection)
+    adapter.insert_bridge("br_test1")
+
   def begin ():
-    core.OVSDBNexus.addListener(ConnectionUp, query_dpids)
+    core.OVSDBNexus.addListener(ConnectionUp, onConnectionUp)
 
   core.call_when_ready(begin, ['OVSDBNexus'])
 
+example()
 
 # We want to allow importing all of these here, so give everything except a
 # couple thingst we really *don't* want to come with it.
