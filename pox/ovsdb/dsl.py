@@ -104,7 +104,7 @@ class Operation (object):
   Superclass for OVSDB operations
   """
   def _format__json (self):
-    return {k:v for k,v in vars(self).items() if v is not NO_VALUE}
+    return {k.replace('_', '-'):v for k,v in vars(self).items() if v is not NO_VALUE}
 
   def __str__ (self):
     return pox.ovsdb.to_raw_json(self._format__json())
@@ -134,7 +134,7 @@ class Insert (Operation):
       expect(els, UUID_NAME)
       uuid_name = els.pop(0)
     else:
-      uuid_name = None
+      uuid_name = NO_VALUE
 
     return cls(table, row, uuid_name)
 
