@@ -797,12 +797,38 @@ def launch (connect_back = False, listen = False):
     log.warn("Neither connect-back nor listening enabled.")
     log.warn("(You may want to see pox.py help --ovsdb)")
 
-class OVSDBAdapter ():
+class StateMachine(object):
+  def __init__(self):
+    self._handlers = {}
+    self._states = {}
+    self._currentState = None
+
+  def set_first_state(self, state):
+    self._currentState = state
+
+  def add_handler_state(self, state, event, handler, next_state):
+    self._handlers[state] = {event: handler}
+    self._states[state] = {event: next_state}
+
+  def fire_event(self, event):
+    if self._currentState in self._handlers:
+      self._handlers[self._currentState][event]()
+
+    if self._currentState in self._states:
+      self._currentState = self._states[self._currentState][event]
+
+class OVSDBAdapter(StateMachine):
   def __init__ (self,):
+    super(OVSDBAdapter, self).__init__()
     self._connection = None
     self._switch_uuid = None
     self._bridges_array = []
     self._bridge_name = None
+
+    self.set_first_state('INIT')
+    self.add_handler_state('INIT', 'START', self.query_switch, 'GET_SWITCH')
+    self.add_handler_state('GET_SWITCH', 'SWITCH_RECEIVED', self.query_dpids, 'GET_DPID')
+    self.add_handler_state('GET_DPID', 'DPID_RECEIVED', self.insert_bridge_Bridge, 'INSERT_BRIDGE')
 
   def connect (self, connection):
     self._connection = connection
@@ -814,9 +840,8 @@ class OVSDBAdapter ():
       for row in result[0].rows:
         self._switch_uuid = row._uuid[1]
         log.info("  %s", row._uuid[1])
-        log.info("  %s", self._switch_uuid)
 
-      self.query_dpids()
+      self.fire_event('SWITCH_RECEIVED')
 
     self._connection.transact('Open_vSwitch',
         SELECT|'_uuid'|FROM|'Open_vSwitch'
@@ -830,7 +855,7 @@ class OVSDBAdapter ():
         self._bridges_array.append(["uuid", row._uuid[1]])
         log.info("  %s : %s, %s", row.datapath_id, row.name, row._uuid[1])
 
-      self.insert_bridge_Bridge()
+      self.fire_event('DPID_RECEIVED')
 
     self._connection.transact('Open_vSwitch',
         SELECT|'name'|AND|'datapath_id'|AND|'_uuid'|FROM|'Bridge'
@@ -856,7 +881,7 @@ class OVSDBAdapter ():
 
   def insert_bridge(self, bridge_name):
     self._bridge_name = bridge_name
-    self.query_switch()
+    self.fire_event('START')
 
 adapter = OVSDBAdapter()
 
@@ -879,7 +904,7 @@ def example ():
   def onConnectionUp (event):
     query_dpids(event)
     adapter.connect(event.connection)
-    adapter.insert_bridge("br_test1")
+    adapter.insert_bridge("br_test4")
 
   def begin ():
     core.OVSDBNexus.addListener(ConnectionUp, onConnectionUp)
