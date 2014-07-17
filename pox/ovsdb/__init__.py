@@ -817,9 +817,9 @@ class StateMachine(object):
     if self._currentState in self._states:
       self._currentState = self._states[self._currentState][event]
 
-class OVSDBAdapter(StateMachine):
+class OVSDB_Add_Bridge(StateMachine):
   def __init__ (self,):
-    super(OVSDBAdapter, self).__init__()
+    super(OVSDB_Add_Bridge, self).__init__()
     self._connection = None
     self._switch_uuid = None
     self._bridges_array = []
@@ -883,7 +883,77 @@ class OVSDBAdapter(StateMachine):
     self._bridge_name = bridge_name
     self.fire_event('START')
 
-adapter = OVSDBAdapter()
+class OVSDB_Remove_Bridge(StateMachine):
+  def __init__ (self,):
+    super(OVSDB_Remove_Bridge, self).__init__()
+    self._connection = None
+    self._switch_uuid = None
+    self._bridges_array = []
+    self._bridge_name = None
+
+    self.set_first_state('INIT')
+    self.add_handler_state('INIT', 'START', self.query_switch, 'GET_SWITCH')
+    self.add_handler_state('GET_SWITCH', 'SWITCH_RECEIVED', self.query_dpids, 'GET_DPID')
+    self.add_handler_state('GET_DPID', 'DPID_RECEIVED', self.remove_bridge_Bridge, 'REMOVE_BRIDGE')
+
+  def connect (self, connection):
+    self._connection = connection
+
+  def query_switch(self):
+    def first_result (result):
+      log.info("Found %s switches on this OVSDB:", len(result[0].rows))
+
+      for row in result[0].rows:
+        self._switch_uuid = row._uuid[1]
+        log.info("  %s", row._uuid[1])
+
+      self.fire_event('SWITCH_RECEIVED')
+
+    self._connection.transact('Open_vSwitch',
+        SELECT|'_uuid'|FROM|'Open_vSwitch'
+        ).callback(first_result)
+
+  def query_dpids(self):
+    def final_result (result):
+      log.info("Found %s bridges on this OVSDB:", len(result[0].rows))
+
+      for row in result[0].rows:
+        if row.name != self._bridge_name:
+          self._bridges_array.append(["uuid", row._uuid[1]])
+          log.info("  %s : %s, %s", row.datapath_id, row.name, row._uuid[1])
+
+      self.fire_event('DPID_RECEIVED')
+
+    self._connection.transact('Open_vSwitch',
+        SELECT|'name'|AND|'datapath_id'|AND|'_uuid'|FROM|'Bridge'
+        ).callback(final_result)
+
+  def remove_bridge_Bridge(self):
+    open_vSwitchRow = {'bridges': ['set', self._bridges_array]}
+
+    self._connection.transact('Open_vSwitch',
+      UPDATE|'Open_vSwitch'|WHERE|'_uuid'|EQUAL|['uuid', self._switch_uuid]|WITH|open_vSwitchRow)
+
+  def remove_bridge(self, bridge_name):
+    self._bridge_name = bridge_name
+    self.fire_event('START')
+
+class OVSDB_Adapter(object):
+  def __init__ (self,):
+    self._connection = None
+
+  def connect (self, connection):
+    self._connection = connection
+
+  def insert_bridge(self, name):
+    addBridge = OVSDB_Add_Bridge()
+    addBridge.connect(self._connection)
+    addBridge.insert_bridge(name)
+
+  def remove_bridge(self, name):
+    removeBridge = OVSDB_Remove_Bridge()
+    removeBridge.connect(self._connection)
+    removeBridge.remove_bridge(name)
 
 def example ():
   """
@@ -903,8 +973,10 @@ def example ():
 
   def onConnectionUp (event):
     query_dpids(event)
-    adapter.connect(event.connection)
-    adapter.insert_bridge("br_test4")
+    ovsdbAdapter = OVSDB_Adapter()
+    ovsdbAdapter.connect(event.connection)
+    ovsdbAdapter.insert_bridge("br_test5")
+    ovsdbAdapter.remove_bridge("br_test5")
 
   def begin ():
     core.OVSDBNexus.addListener(ConnectionUp, onConnectionUp)
